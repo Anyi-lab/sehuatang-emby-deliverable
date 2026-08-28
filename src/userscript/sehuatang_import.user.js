@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         色花堂链接级一键入库(逐条磁力/ed2k) + 元数据补充
 // @namespace    sehuatang-import
-// @version      1.9.6
+// @version      1.9.7
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @source       https://github.com/Anyi-lab/sehuatang-emby-deliverable
-// @description  色花堂链接级一键入库(逐条磁力/ed2k)。每条链接手工选择类型: "番号"=影片(推→等→清小文件→strm→MDC刮削→Emby刷新→预热; MDC失败/不完整由油猴📤补充); "非番号"=剧集(推→等→重命名thread_xxx_S01E01..→SmartStrm生成strm→油猴📤补充元数据→Emby刷新+预热, 即使1个视频也是剧集)。右下角磁力导航面板列出全部链接可点击快速滚动定位。v1.6.3: 修复手机版磁力被 <wbr>/<br> 等空元素拆成多段文本节点导致的漏识别(全文本拼接兜底+iframe兜底); v1.7.0: 新增手动输入磁力/ed2k链接入库对话框(导航面板✏️按钮, 支持多条, 提交到当前thread); v1.8.0: 新增元数据补充——提取帖子标题/简介/图片, 由本机浏览器下载图片后上传服务器生成 Emby 海报与简介 (导航面板📤按钮); v1.8.1: 元数据图片抓取优化——只抓静态图片(jpg/png等, 排除gif/webp/svg/ico), 懒加载取真实地址(data-original/data-src), 像素尺寸过滤(太小的表情/图标/头像不抓, 超高清原图不抓); v1.8.2: 描述同步新流程(去MySQL, 剧集文件名 thread_xxx_S01E01, MDC失败/剧集均待油猴补充元数据); v1.8.3: API_BASE 改 http(未配https), 悬浮面板新增📋一键跳转任务监控页按钮; v1.8.4: 手机版图片识别兼容——Discuz 附件真实地址 file/zoomfile 属性、选择器抓不到时全量图片兜底、iframe 内正文跨框架收集、相对路径补全域名; v1.8.7: 简介提取终极兜底——按"含磁力/ed2k 链接的文本节点"定位正文容器(色花堂正文必含下载链接, 不受模板类名影响), 简介提取失败时面板显示具体原因。 v1.9.0: 图片改为用户手工选择(候选图网格点选, 支持动图gif/webp/avif, 最多9张), 已选支持📌海报/↑↓调序/✕移除, 上传保留原图格式(mime)不再强制jpg, 移动端触控优化。 v1.9.1: 候选图排除小尺寸表情/图标(像素<200或未加载时CSS尺寸<100x80), 恢复表情/笑脸区域跳过。 v1.9.2: 标题清洗——去掉发布者/来源前缀标记(自转/115ED2K等, 保留【Omar盘点】类系列名), 去掉体积/配额后缀【1.87G/25P+18V/1配额】, 去掉尾部分区与论坛后缀(- 综合讨论区 - 98堂[原色花堂])。 v1.9.5: 磁力导航面板每条磁力新增📋复制按钮(复制完整干净链接含&dn), 标签优先显示文件名; v1.9.6: 取消正文磁力链接旁"🎬入库"按钮(避免页面出现两个入库), 改为磁力导航面板每条磁力🚀一键入库(点🚀选类型: 番号/非番号)。
+// @description  色花堂链接级一键入库(逐条磁力/ed2k)。每条链接手工选择类型: "番号"=影片(推→等→清小文件→strm→MDC刮削→Emby刷新→预热; MDC失败/不完整由油猴📤补充); "非番号"=剧集(推→等→重命名thread_xxx_S01E01..→SmartStrm生成strm→油猴📤补充元数据→Emby刷新+预热, 即使1个视频也是剧集)。右下角磁力导航面板列出全部链接可点击快速滚动定位。v1.6.3: 修复手机版磁力被 <wbr>/<br> 等空元素拆成多段文本节点导致的漏识别(全文本拼接兜底+iframe兜底); v1.7.0: 新增手动输入磁力/ed2k链接入库对话框(导航面板✏️按钮, 支持多条, 提交到当前thread); v1.8.0: 新增元数据补充——提取帖子标题/简介/图片, 由本机浏览器下载图片后上传服务器生成 Emby 海报与简介 (导航面板📤按钮); v1.8.1: 元数据图片抓取优化——只抓静态图片(jpg/png等, 排除gif/webp/svg/ico), 懒加载取真实地址(data-original/data-src), 像素尺寸过滤(太小的表情/图标/头像不抓, 超高清原图不抓); v1.8.2: 描述同步新流程(去MySQL, 剧集文件名 thread_xxx_S01E01, MDC失败/剧集均待油猴补充元数据); v1.8.3: API_BASE 改 http(未配https), 悬浮面板新增📋一键跳转任务监控页按钮; v1.8.4: 手机版图片识别兼容——Discuz 附件真实地址 file/zoomfile 属性、选择器抓不到时全量图片兜底、iframe 内正文跨框架收集、相对路径补全域名; v1.8.7: 简介提取终极兜底——按"含磁力/ed2k 链接的文本节点"定位正文容器(色花堂正文必含下载链接, 不受模板类名影响), 简介提取失败时面板显示具体原因。 v1.9.0: 图片改为用户手工选择(候选图网格点选, 支持动图gif/webp/avif, 最多9张), 已选支持📌海报/↑↓调序/✕移除, 上传保留原图格式(mime)不再强制jpg, 移动端触控优化。 v1.9.1: 候选图排除小尺寸表情/图标(像素<200或未加载时CSS尺寸<100x80), 恢复表情/笑脸区域跳过。 v1.9.2: 标题清洗——去掉发布者/来源前缀标记(自转/115ED2K等, 保留【Omar盘点】类系列名), 去掉体积/配额后缀【1.87G/25P+18V/1配额】, 去掉尾部分区与论坛后缀(- 综合讨论区 - 98堂[原色花堂])。 v1.9.5: 磁力导航面板每条磁力新增📋复制按钮(复制完整干净链接含&dn), 标签优先显示文件名; v1.9.6: 取消正文磁力链接旁"🎬入库"按钮(避免页面出现两个入库), 改为磁力导航面板每条磁力🚀一键入库(点🚀选类型: 番号/非番号); v1.9.7: 导航面板标题栏可拖拽移动(按住📌磁力导航标题拖动), 修复磁链&dn参数不被截断(入库/复制均用完整链接)。
 // @author       QwenPaw
 // @match        *://sehuatang.net/*
 // @match        *://sehuatang.org/*
@@ -963,6 +963,40 @@
             nav.querySelector('#sht-nav-body').style.display = navCollapsed ? 'none' : 'block';
             nav.querySelector('#sht-nav-fold').textContent = navCollapsed ? '+' : '—';
         });
+
+        // ===== 拖拽移动悬浮窗 (按住标题栏拖动) =====
+        const head = nav.querySelector('#sht-nav-head');
+        let drag = null;
+        head.addEventListener('pointerdown', (e) => {
+            if (e.target.closest('button')) return;   // 按钮区域不触发拖拽
+            e.preventDefault();
+            const r = nav.getBoundingClientRect();
+            drag = { sx: e.clientX, sy: e.clientY, ox: r.left, oy: r.top, moved: false };
+            nav.style.left = drag.ox + 'px';
+            nav.style.top = drag.oy + 'px';
+            nav.style.right = 'auto';
+            nav.style.bottom = 'auto';
+            head.setPointerCapture && head.setPointerCapture(e.pointerId);
+            head.classList.add('dragging');
+        });
+        head.addEventListener('pointermove', (e) => {
+            if (!drag) return;
+            const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+            if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+            nav.style.left = (drag.ox + dx) + 'px';
+            nav.style.top = (drag.oy + dy) + 'px';
+            nav.style.right = 'auto';
+            nav.style.bottom = 'auto';
+        });
+        const endDrag = (e) => {
+            if (!drag) return;
+            drag = null;
+            head.classList.remove('dragging');
+            if (head.releasePointerCapture && e.pointerId) head.releasePointerCapture(e.pointerId);
+        };
+        head.addEventListener('pointerup', endDrag);
+        head.addEventListener('pointercancel', endDrag);
+
         renderNavList();
     }
 
@@ -1021,7 +1055,9 @@
         const s = document.createElement('style');
         s.textContent = `
 #sht-nav{position:fixed;right:16px;bottom:16px;z-index:2147483647;width:280px;max-height:70vh;display:flex;flex-direction:column;background:rgba(15,23,42,.94);border:1px solid #334155;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.5);font-family:'Segoe UI',system-ui,sans-serif;overflow:hidden}
-#sht-nav-head{display:flex;align-items:center;gap:6px;padding:8px 10px;background:linear-gradient(135deg,#e63946,#d90429);color:#fff;font-size:13px;font-weight:700;cursor:pointer;user-select:none}
+#sht-nav-head{display:flex;align-items:center;gap:6px;padding:8px 10px;background:linear-gradient(135deg,#e63946,#d90429);color:#fff;font-size:13px;font-weight:700;cursor:grab;user-select:none;touch-action:none}
+#sht-nav-head:active{cursor:grabbing}
+#sht-nav-head.dragging{cursor:grabbing}
 #sht-nav-count{opacity:.85;font-weight:400}
 #sht-nav-manual,#sht-nav-meta{margin-left:auto;padding:2px 7px;border:none;border-radius:6px;background:rgba(255,255,255,.2);color:#fff;font-size:13px;cursor:pointer}
 #sht-nav-manual{margin-left:0}
