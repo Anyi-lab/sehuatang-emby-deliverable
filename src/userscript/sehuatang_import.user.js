@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂链接级一键入库(逐条磁力/ed2k) + 元数据补充
 // @namespace    sehuatang-import
-// @version      1.9.3
+// @version      1.9.4
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @source       https://github.com/Anyi-lab/sehuatang-emby-deliverable
@@ -303,32 +303,63 @@
     }
 
     // ===== 链接可见文本清洗: 只去掉 "🎬 入库" 等粘贴杂质, 保留完整链接(含 &dn= 后缀) =====
+    // v1.9.4: 改为文本节点级清洗, 绝不整体替换父容器 textContent (避免拍平链接/图片/按钮结构)
     function cleanLinkText(el) {
         if (!el || el.nodeType !== 1) return;
         const href = (el.getAttribute && el.getAttribute('href')) || '';
-        const txt = el.textContent || '';
-        // a 链接以 href 为准(含完整参数), 纯文本/容器以自身文本为准
-        const src = (href.startsWith('magnet:') || /^ed2k:\/\//.test(href)) && href ? href : txt;
-        const clean = src.replace(/\s*🎬?\s*入库/g, '').trim();
-        if (clean && clean !== txt) el.textContent = clean;
+        // a 链接: href 里的杂质也一并清掉(保留完整参数含 &dn)
+        if (href && (href.startsWith('magnet:') || /^ed2k:\/\//.test(href))) {
+            const h = href.replace(/\s*🎬?\s*入库/g, '').trim();
+            if (h && h !== href) el.setAttribute('href', h);
+            // 仅当 a 只有一个文本子节点时直接改文本; 复杂子结构交给文本节点级清洗
+            if (el.childNodes.length === 1 && el.firstChild.nodeType === 3) {
+                const t = (el.firstChild.nodeValue || '').replace(/\s*🎬?\s*入库/g, '').trim();
+                if (t && t !== el.firstChild.nodeValue) el.firstChild.nodeValue = t;
+            }
+            return;
+        }
+        // 纯文本/容器: 只清洗其直接文本子节点, 不替换容器整体文本
+        el.childNodes.forEach(cn => {
+            if (cn.nodeType === 3) {
+                const t = (cn.nodeValue || '').replace(/\s*🎬?\s*入库/g, '').trim();
+                if (t && t !== cn.nodeValue) cn.nodeValue = t;
+            }
+        });
     }
 
-    // ===== 全页面清洗: 同一磁力在页面多处出现时全部清洗(去重只影响 items, 不影响显示) =====
+    // ===== 全页面清洗: 只改文本节点, 保留所有 DOM 结构 =====
     function cleanPageMagnetTexts() {
-        const seen = new Set();
         try {
+            // 1) a 磁力/ed2k 链接: 清 href + 单一文本子节点
             document.querySelectorAll('a[href^="magnet:"], a[href^="ed2k://"]').forEach(a => {
-                if (!seen.has(a)) { seen.add(a); cleanLinkText(a); }
+                cleanLinkText(a);
             });
-            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-            while (walker.nextNode()) {
-                const n = walker.currentNode;
-                const t = n.nodeValue || '';
-                if (!/magnet:\?xt=urn:btih:|ed2k:\/\/\|file\|/.test(t)) continue;
-                if (n.parentNode && n.parentNode.closest && n.parentNode.closest('#sht-import-wrap')) continue;
-                const p = n.parentNode;
-                if (p && p.nodeType === 1 && !seen.has(p)) { seen.add(p); cleanLinkText(p); }
-            }
+            // 2) 文本节点级清洗: 凡含磁力/ed2k 特征或含 🎬入库 杂质的文本节点, 逐节点清洗
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+                acceptNode(node) {
+                    const t = node.nodeValue || '';
+                    if (!t) return NodeFilter.FILTER_REJECT;
+                    const p = node.parentNode;
+                    if (p && p.closest && p.closest('#sht-import-wrap')) return NodeFilter.FILTER_REJECT;
+                    if (p && p.tagName === 'SCRIPT') return NodeFilter.FILTER_REJECT;
+                    if (p && p.classList && p.classList.contains('sht-link-btn')) return NodeFilter.FILTER_REJECT;
+                    // 命中: 磁力/ed2k 特征 | 🎬入库 按钮杂质
+                    if (/magnet:\?xt=urn:btih:|ed2k:\/\/\|file\|/.test(t)) return NodeFilter.FILTER_ACCEPT;
+                    if (/🎬/.test(t) && /入库/.test(t)) return NodeFilter.FILTER_ACCEPT;
+                    return NodeFilter.FILTER_REJECT;
+                }
+            });
+            const nodes = [];
+            let n;
+            while ((n = walker.nextNode())) nodes.push(n);
+            nodes.forEach(node => {
+                let t = node.nodeValue || '';
+                let c = t.replace(/\s*🎬\s*入库/g, '');            // 删 🎬入库 按钮杂质
+                if (/magnet:\?xt=urn:btih:|ed2k:\/\/\|file\|/.test(c)) {
+                    c = c.replace(/\s*入库/g, '');                 // 磁力/ed2k 段里的 入库 杂质
+                }
+                if (c !== t) node.nodeValue = c;
+            });
         } catch (e) {}
     }
 
