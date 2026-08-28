@@ -1,0 +1,74 @@
+# =====================================================================
+# docker-compose 示例（媒体服务器核心容器）
+# 端口说明：
+#   8096  Emby（媒体库）
+#   8024  SmartStrm 管理 + fid 302 接口
+#   8098  SmartStrm 302 代理（容器内网）
+#   8097  strm-nginx（播放入口反代，唯一对外播放地址）
+#   5081  import-api（入库 API，宿主机 systemd 直接跑 Python 也可）
+# =====================================================================
+version: "3.8"
+
+services:
+  smartstrm:
+    image: cp0204/smartstrm:latest
+    container_name: smartstrm
+    restart: always
+    network_mode: bridge
+    ports:
+      - "8024:8024"     # 管理页 + fid 302
+      - "8098:8098"     # 302 代理
+    volumes:
+      - /opt/media/smartstrm/config:/app/config
+      - /opt/media/strm:/strm
+    environment:
+      - TZ=Asia/Shanghai
+      - PORT=8024
+
+  strm-nginx:
+    image: nginx:alpine
+    container_name: strm-nginx
+    restart: always
+    ports:
+      - "8097:80"       # 播放入口（外部只暴露这一个）
+    volumes:
+      - /opt/media/strm-nginx/nginx_default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - smartstrm
+
+  emby:
+    image: amilys/embyserver:latest
+    container_name: emby
+    restart: always
+    ports:
+      - "8096:8096"
+    volumes:
+      - /opt/media/emby/config:/config
+      - /opt/media/strm:/media/strm      # strm 文件目录（只读媒体）
+      - /opt/ffmpeg-static/portable:/ffmpeg-portable:ro   # 可选：OpenSSL TLS ffmpeg
+    environment:
+      - TZ=Asia/Shanghai
+
+  # CD2（CloudDrive2）——115 网盘挂载与离线下载（gRPC 19798 / WebDAV 19798）
+  clouddrive2:
+    image: cloudnas/clouddrive2:latest
+    container_name: clouddrive2
+    restart: always
+    network_mode: host
+    volumes:
+      - /opt/media/clouddrive2/config:/Config
+      - /opt/media/clouddrive2/mnt:/mnt
+    devices:
+      - /dev/fuse:/dev/fuse
+    environment:
+      - TZ=Asia/Shanghai
+
+  # MDCng 刮削器（番号影片自动刮削 nfo/图片）
+  mdc:
+    image: mdcng/mdc:latest
+    container_name: mdc
+    restart: always
+    volumes:
+      - /opt/media/strm/emby:/media:rw
+    environment:
+      - TZ=Asia/Shanghai

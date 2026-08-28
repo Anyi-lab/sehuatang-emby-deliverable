@@ -1,0 +1,26 @@
+# =====================================================================
+# import-api systemd 服务示例
+# 放置于 /etc/systemd/system/import-api.service，然后：
+#   systemctl daemon-reload && systemctl enable --now import-api
+# =====================================================================
+[Unit]
+Description=Sehuatang Import API (5081)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/115push
+ExecStart=/usr/bin/python3 /opt/115push/import_api.py
+Restart=always
+RestartSec=5
+# 串行队列（1 个并发 worker，避免密集操作触发 115 限流）
+Environment=IMPORT_MAX_CONCURRENT=1
+# 元数据直写本地（0 = 不上传 115，减少 115 API 访问）
+Environment=META_UPLOAD_115=0
+# 若使用网页刮削需虚拟显示
+Environment=DISPLAY=:99
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,48 @@
+# =====================================================================
+# SmartStrm 配置示例（脱敏模板）
+# 实际部署时请将 <...> 占位符替换为真实值，并重新扫码授权 115
+# 完整字段以 SmartStrm 官方镜像 /app/config/config.yaml 为准
+# =====================================================================
+license: <SMARTSTRM_LICENSE>          # Pro 授权（302 代理功能需要）
+
+settings:
+  smartstrm_base: http://<SERVER_IP>:8024   # SmartStrm 对外地址（302 回调基址）
+  admin:
+    username: admin
+    password: <SMARTSTRM_PASSWORD>          # 管理页密码
+  proxy:
+    enabled: true                            # 302 代理开关（务必保持 true）
+    port: 8098                               # 302 代理端口（容器内）
+    target: http://emby:8096                 # 反代目标（Emby）
+  webhook:
+    token: <WEBHOOK_TOKEN>                   # import-api 触发 strm 生成的回调 token
+  strm:
+    media_ext: [mp4, mkv, avi, ts, wmv, flv, mov, m2ts, iso]
+    copy_ext: [nfo, ass, srt]                # 本地同步的扩展名（不要含 jpg/png，避免复制 115 预览图）
+    keep_local_asset: false                  # 不同步图片类资产到本地
+
+# 115 云盘账号（扫码授权后自动填充，勿手动复制他人 token）
+accounts:
+  - cloud: 115open
+    user_id: '<115_UID>'
+    device_id: <115_DEVICE_ID>
+    open_app_id: <115_OPEN_APP_ID>
+    access_token: <115_ACCESS_TOKEN>         # 扫码授权生成
+    refresh_token: <115_REFRESH_TOKEN>
+    vip_url: ''
+
+# 定时任务（增量扫描，避免全量触发 115 限流 770004）
+tasks:
+  - name: emby
+    storage_path: /sehuatang
+    incremental: true
+    sync_dir: /strm/emby
+  - name: tv
+    storage_path: /sehuatang_tv
+    incremental: true
+    sync_dir: /strm/tv
+
+# Emby 删除联动（删除 Emby 条目时同步删 115 目录，谨慎开启）
+emby_delete_sync:
+  enabled: true
+  webhook_url: http://<SERVER_IP>:8024/webhook/<WEBHOOK_TOKEN>
