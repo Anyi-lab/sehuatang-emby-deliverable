@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂链接级一键入库(逐条磁力/ed2k) + 元数据补充
 // @namespace    sehuatang-import
-// @version      1.9.4
+// @version      1.9.5
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @source       https://github.com/Anyi-lab/sehuatang-emby-deliverable
@@ -64,6 +64,11 @@
         if (!s) return '链接';
         let t = s.replace(/\s+/g, ' ').trim();
         if (t.startsWith('magnet:')) {
+            const dn = t.match(/[?&]dn=([^&\s🎬]+)/);
+            if (dn) {
+                const fn = decodeURIComponent(dn[1]);
+                return fn.length > MAX_LABEL ? fn.slice(0, MAX_LABEL) + '…' : fn;
+            }
             const bt = t.match(/btih:([0-9a-fA-F]{40})/);
             return bt ? '磁力 …' + bt[1].slice(-8) : '磁力链接';
         }
@@ -78,7 +83,9 @@
     function addItem(norm, el, raw) {
         if (!norm || seenNorm.has(norm)) return;
         seenNorm.add(norm);
-        items.push({ norm: norm, el: el || null, label: labelFrom(raw || norm) });
+        // raw 存原始完整文本(清洗掉 🎬/入库 杂质, 保留 &dn 后缀)
+        const clean = String(raw || norm).replace(/\s*🎬?\s*入库/g, '').trim();
+        items.push({ norm: norm, el: el || null, label: labelFrom(clean || norm), raw: clean || norm });
     }
 
     function collectLinks() {
@@ -988,8 +995,13 @@
         items.forEach((it, idx) => {
             const row = document.createElement('div');
             row.className = 'sht-nav-item';
-            row.innerHTML = '<span class="sht-nav-idx">' + (idx + 1) + '</span><span class="sht-nav-label"></span><span class="sht-nav-go">↘</span>';
+            row.innerHTML = '<span class="sht-nav-idx">' + (idx + 1) + '</span><span class="sht-nav-label"></span><span class="sht-nav-copy" title="复制完整磁力链接">📋</span><span class="sht-nav-go">↘</span>';
             row.querySelector('.sht-nav-label').textContent = it.label;
+            row.title = it.raw || it.norm;
+            row.querySelector('.sht-nav-copy').addEventListener('click', (e) => {
+                e.stopPropagation();
+                copyMagnet(it.raw || it.norm);
+            });
             row.addEventListener('click', () => {
                 flashTo(it.el);
                 if (it._btn) {
@@ -1000,6 +1012,29 @@
             navList.appendChild(row);
         });
         nav.querySelector('#sht-nav-count').textContent = '(' + items.length + ')';
+    }
+
+    // ===== 复制完整磁力(含 &dn 后缀, 无杂质) =====
+    function copyMagnet(text) {
+        if (!text) return;
+        const clean = String(text).replace(/\s*🎬?\s*入库/g, '').trim();
+        const done = () => toast('✅ 已复制磁力链接');
+        const fallback = (txt) => {
+            const ta = document.createElement('textarea');
+            ta.value = txt;
+            ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            let ok = false;
+            try { ok = document.execCommand('copy'); } catch (e) {}
+            document.body.removeChild(ta);
+            if (ok) done(); else toast('复制失败, 请手动复制', true);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(clean).then(done, () => fallback(clean));
+        } else {
+            fallback(clean);
+        }
     }
 
     // ===== 样式 =====
@@ -1020,6 +1055,8 @@
 .sht-nav-idx{flex:none;min-width:20px;text-align:center;background:#e63946;color:#fff;border-radius:4px;font-size:11px;font-weight:700;padding:1px 4px}
 .sht-nav-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sht-nav-go{color:#64748b}
+.sht-nav-copy{flex:none;padding:0 4px;color:#94a3b8;font-size:13px;cursor:pointer;border-radius:4px}
+.sht-nav-copy:hover{background:#334155;color:#fff}
 .sht-link-btn{display:inline-block;margin:0 4px 2px 6px;padding:2px 10px;border:none;border-radius:12px;background:linear-gradient(135deg,#e63946,#d90429);color:#fff;font-size:12px;font-weight:600;cursor:pointer;vertical-align:middle;line-height:1.6;box-shadow:0 2px 6px rgba(217,4,41,.4)}
 .sht-link-btn:hover{transform:translateY(-1px)}
 .sht-link-btn:disabled{cursor:wait;opacity:.85}
