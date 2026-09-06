@@ -66,11 +66,55 @@ SMARTSTRM_TASK = 'emby'
 SMARTSTRM_TASK_TV = 'tv'   # 剧集任务 (storage_path=/sehuatang_tv -> 本地 /strm/tv)
 # ===== 本地版适配 (2026-08-27): Emby -> Jellyfin (Windows 宿主, Emby 兼容 API) =====
 EMBY_URL = 'http://172.25.224.1:8096'   # Jellyfin (Windows), 需 Jellyfin 运行中
-EMBY_TOKEN = '<JELLYFIN_API_KEY>'       # 需在 Jellyfin 控制台 生成 API key 填入
+EMBY_TOKEN = '28593987edcf421c9929543654e97105'  # Jellyfin API key (2026-08-31 从 ApiKeys 表提取并验证)
 # 本地 strm 根目录 (MDCng watch: 容器 /media/待看/sehuatang <-> G:\srtm\待看\sehuatang)
 LOCAL_STRM_ROOT = '/mnt/g/srtm/待看/sehuatang'
 # MDCng 刮削输出目录 (watch 待看/sehuatang -> target /media/已刮削/AV)
 MDC_TARGET_ROOT = '/mnt/g/srtm/已刮削/AV'
+
+# ===== 入库分类 (2026-09-06): 推送时选分类, 本地 strm 与 MDC 刮削输出按分类分流 =====
+# key -> (本地 strm watch 目录, MDC 刮削输出目录=已刮削/<分类>, 显示名)
+# 与用户手工创建的 G:\srtm\已刮削\<分类> 一一对应; MDCng watch_dirs 每分类一条,
+# 刮削完成后自动落入对应 已刮削/<分类>。默认 av = 旧行为(全部进 AV), 行为不变可回退。
+CATEGORY_MAP = {
+    'av':   ('/mnt/g/srtm/待看/sehuatang',       '/mnt/g/srtm/已刮削/AV',       'AV'),
+    'fc2':  ('/mnt/g/srtm/待看/sehuatang_fc2',   '/mnt/g/srtm/已刮削/FC2',      'FC2'),
+    'sw':   ('/mnt/g/srtm/待看/sehuatang_sw',    '/mnt/g/srtm/已刮削/丝袜',     '丝袜'),
+    'cn':   ('/mnt/g/srtm/待看/sehuatang_cn',    '/mnt/g/srtm/已刮削/国产自拍', '国产自拍'),
+    'ea':   ('/mnt/g/srtm/待看/sehuatang_ea',    '/mnt/g/srtm/已刮削/欧美',     '欧美'),
+    'lf':   ('/mnt/g/srtm/待看/sehuatang_lf',    '/mnt/g/srtm/已刮削/里番',     '里番'),
+}
+DEFAULT_CATEGORY = 'av'
+# 分类 key -> 合法值 (api 校验 / 恢复路径使用)
+CATEGORY_KEYS = tuple(CATEGORY_MAP.keys())
+
+def norm_category(cat):
+    """归一化分类: 空/非法 -> 默认 av; 合法 key 原样返回 (大小写不敏感, 容忍首尾空白)"""
+    if cat is None:
+        return DEFAULT_CATEGORY
+    c = str(cat).strip().lower()
+    if c in CATEGORY_MAP:
+        return c
+    return DEFAULT_CATEGORY
+
+def category_strm_root(cat):
+    """分类 -> 本地 strm watch 根目录"""
+    return CATEGORY_MAP.get(cat, CATEGORY_MAP[DEFAULT_CATEGORY])[0]
+
+def category_target_root(cat):
+    """分类 -> MDC 刮削输出根目录 (已刮削/<分类>)"""
+    return CATEGORY_MAP.get(cat, CATEGORY_MAP[DEFAULT_CATEGORY])[1]
+
+def category_name(cat):
+    """分类 -> 显示名"""
+    return CATEGORY_MAP.get(cat, CATEGORY_MAP[DEFAULT_CATEGORY])[2]
+
+def category_of_local_dir(local_dir):
+    """本地 strm 目录 -> 所属分类 key (按前缀匹配 watch 根), 默认 av"""
+    for key, (sroot, _t, _n) in CATEGORY_MAP.items():
+        if local_dir == sroot or local_dir.startswith(sroot.rstrip('/') + '/'):
+            return key
+    return DEFAULT_CATEGORY
 FS115_ROOT = '/opt/media/clouddrive2/mnt/115open/115open'   # CD2 挂载的 115 根目录(本机)
 # 2026-08-14 方案: 115 只存视频, 元数据不上传 115 (减少 115 访问规避风控)
 # 默认 0 (新方案: scrape 直写本地); 设 META_UPLOAD_115=1 可回滚旧行为(上传115+a_task全扫同步)
@@ -397,7 +441,7 @@ def init_log_db():
     c = sqlite3.connect(LOG_DB)
     c.execute('''CREATE TABLE IF NOT EXISTS import_log(
         task_id TEXT PRIMARY KEY, thread_id TEXT, magnet TEXT, title TEXT,
-        status TEXT, step TEXT, msg TEXT, kind TEXT,
+        status TEXT, step TEXT, msg TEXT, kind TEXT, category TEXT,
         created_at TEXT DEFAULT (datetime('now','localtime')),
         updated_at TEXT DEFAULT (datetime('now','localtime')))''')
     c.execute('''CREATE TABLE IF NOT EXISTS import_log_history(
@@ -407,6 +451,11 @@ def init_log_db():
     # 老库迁移: 补 kind 列 (2026-08-13 断点重续需要恢复 剧集/影片 流程)
     try:
         c.execute('ALTER TABLE import_log ADD COLUMN kind TEXT')
+    except Exception:
+        pass
+    # 老库迁移: 补 category 列 (2026-09-06 推送选分类; 旧任务留空=AV 默认)
+    try:
+        c.execute('ALTER TABLE import_log ADD COLUMN category TEXT')
     except Exception:
         pass
     c.commit(); c.close()
@@ -443,13 +492,21 @@ def _smartstrm_task(savepath):
         return SMARTSTRM_TASK_TV
     return SMARTSTRM_TASK
 
-def _trigger_smartstrm(savepath):
-    """本地版: 用 115 MCP pickcode 直接生成 strm (指向 115-Desktop 302 服务), 替代 SmartStrm webhook"""
+def _trigger_smartstrm(savepath, category=None):
+    """本地版: 用 115 MCP pickcode 直接生成 strm (指向 115-Desktop 302 服务), 替代 SmartStrm webhook。
+    2026-09-06: category 决定 strm 落地到 待看/sehuatang_<分类>/ (分类分流, MDC 刮削后进对应已刮削/<分类>)。
+    category 未显式传入时按已有本地目录自动探测 (rescrape 等存量调用点正确回落到原分类)。"""
     try:
         from mcp115 import MCP115
         m = MCP115()
-        n = m.gen_strm(savepath, LOCAL_STRM_ROOT)
-        log.info('[strm] 本地生成 strm %d 个: %s', n, savepath)
+        if category is None:
+            name = savepath.rstrip('/').split('/')[-1]
+            for key, (sroot, _t, _n) in CATEGORY_MAP.items():
+                if os.path.isdir(os.path.join(sroot, name)):
+                    category = key
+                    break
+        n = m.gen_strm(savepath, category_strm_root(norm_category(category)))
+        log.info('[strm] 本地生成 strm %d 个: %s (category=%s)', n, savepath, norm_category(category))
         return {'generated': n}
     except Exception as e:
         log.warning('[strm] 本地生成 strm 失败: %s', str(e)[:150])
@@ -494,13 +551,13 @@ def _video_units(video_paths):
         units.add(parts[0])
     return units
 
-def _smartstrm_new_units(savepath, video_paths):
+def _smartstrm_new_units(savepath, video_paths, category=None):
     """计算需要触发 SmartStrm 的新单元列表(子目录路径或根视频文件路径)。
     视频列表为空(限频/未检测到) → 返回 [], 不兜底整个目录, 避免加重 115 限频。"""
     if not video_paths:
         log.warning('[strm] 视频列表为空, 跳过增量触发(避免整个 thread 全扫): %s', savepath)
         return []
-    local_dir = _local_strm_dir(savepath)
+    local_dir = _local_strm_dir(savepath, category)
     done = _strm_done_units(local_dir)
     units = _video_units(video_paths)
     new_units = sorted(units - done)
@@ -650,12 +707,20 @@ def _ensure_dir_nfo(local_dir):
                 return False
     return False
 
-def _local_strm_dir(savepath):
+def _local_strm_dir(savepath, category=None):
     """115 路径 -> 本地 strm 目录 (本地版: MDCng watch 根):
-    /sehuatang/thread_xxx -> /mnt/g/srtm/待看/sehuatang/thread_xxx (影片)
-    /sehuatang_tv/thread_xxx -> /mnt/g/srtm/待看/sehuatang/thread_xxx (剧集, 同 watch 根)"""
+    /sehuatang/thread_xxx -> /mnt/g/srtm/待看/sehuatang/thread_xxx (影片, AV)
+    /sehuatang_tv/thread_xxx -> /mnt/g/srtm/待看/sehuatang/thread_xxx (剧集, 同 watch 根)
+    2026-09-06: category 分流 -> /mnt/g/srtm/待看/sehuatang_<分类>/thread_xxx
+    category 未显式传入时按已有本地目录自动探测 (rescrape/prewarm 等存量调用点正确回落到原分类)。"""
     name = savepath.rstrip('/').split('/')[-1]
-    return f'{LOCAL_STRM_ROOT}/{name}'
+    if category is None:
+        for key, (sroot, _t, _n) in CATEGORY_MAP.items():
+            if os.path.isdir(os.path.join(sroot, name)):
+                category = key
+                break
+    root = category_strm_root(norm_category(category))
+    return f'{root}/{name}'
 
 def _has_local_metadata(local_dir):
     """本地 strm 目录是否已有 nfo/图片 (MDCng 原地整理产物 / SmartStrm 同步产物)"""
@@ -811,9 +876,10 @@ def _extract_fanhao_candidates(local_dir):
                 cands.add(m.group(1))
     return cands
 
-def _find_mdc_output(cands, recent_min=20):
-    """在 MDC_TARGET_ROOT 下找已刮削完成的目录 (strm+nfo+图片齐全, 目录名含番号候选 或 近期创建)"""
-    root = MDC_TARGET_ROOT
+def _find_mdc_output(cands, recent_min=20, root=None):
+    """在 MDC_TARGET_ROOT 下找已刮削完成的目录 (strm+nfo+图片齐全, 目录名含番号候选 或 近期创建)。
+    2026-09-06: root 可按分类传入 (已刮削/<分类>), 默认 AV。"""
+    root = root or MDC_TARGET_ROOT
     if not os.path.isdir(root):
         return False, ''
     now = time.time()
@@ -840,24 +906,28 @@ def _find_mdc_output(cands, recent_min=20):
     return False, ''
 
 def _wait_mdc_scrape(local_dir, timeout=300):
-    """本地版: 等 MDCng 刮削完成。两种形态都覆盖:
-    ① 原地刮削 (nfo/图片写进 local_dir) ② 移动式 (刮削后移入 已刮削/AV/<系列>/<番号>/)。"""
+    """本地版: 等 MDCng 刮削完成。两种形态都覆盖, 返回 (ok, msg, mdc_dir):
+    ① 原地刮削 (nfo/图片写进 local_dir) → mdc_dir=local_dir
+    ② 移动式/硬链接整理 (刮削产物在 已刮削/<分类>/<系列>/<番号>/) → mdc_dir=目标区匹配目录
+    mdc_dir 供后续完整性/中文标题检查使用 (硬链接模式本地待看区只有 strm, 元数据在目标区)。
+    2026-09-06: 目标区按 local_dir 所属分类 (已刮削/<分类>) 扫描。"""
     cands = _extract_fanhao_candidates(local_dir)
+    target_root = category_target_root(category_of_local_dir(local_dir))
     deadline = time.time() + timeout
     while time.time() < deadline:
         # ① 原地刮削
         ok, n, i = _has_local_metadata(local_dir)
         if ok:
-            return True, f'MDCng 原地刮削完成: {n} nfo, {i} 图片'
+            return True, f'MDCng 原地刮削完成: {n} nfo, {i} 图片', local_dir
         # ② 移动式: 目标区出现匹配番号的刮削结果
-        ok2, found = _find_mdc_output(cands)
+        ok2, found = _find_mdc_output(cands, root=target_root)
         if ok2:
-            return True, f'MDCng 刮削完成并移入: {found}'
+            return True, f'MDCng 刮削完成并移入: {found}', found
         time.sleep(5)
     _, n, i = _has_local_metadata(local_dir)
-    _ok2, found = _find_mdc_output(cands)
+    _ok2, found = _find_mdc_output(cands, root=target_root)
     extra = f'; 目标区未匹配' if not found else f'; 目标区: {found}'
-    return False, f'MDCng 等待超时({timeout}s): 本地 {n} nfo / {i} 图片{extra} (候选番号: {", ".join(sorted(cands))[:120] or "无"})'
+    return False, f'MDCng 等待超时({timeout}s): 本地 {n} nfo / {i} 图片{extra} (候选番号: {", ".join(sorted(cands))[:120] or "无"})', None
 
 def _mdc_pipeline_healthy(timeout=15):
     """本地版 MDCng 链路健康检查 (2026-08-27): ① mdc 容器运行 ② mdc API 9208 可达
@@ -1002,9 +1072,10 @@ def run_scrape_process(thread_id, keep_small=False, local_only=False, force=Fals
     log.info('[scrape] 本地模式: 跳过网页刮削 (thread=%s), 元数据由 MDCng/油猴负责', thread_id)
     return 0, ['local: MDCng 负责刮削, 跳过 scrape_sehuatang']
 
-def _run_import_dl(task_id, thread_id=None, magnet=None, title=None, thread_url=None, kind=None, resume=False):
+def _run_import_dl(task_id, thread_id=None, magnet=None, title=None, thread_url=None, kind=None, resume=False, category=None):
     """离线下载阶段 (DL_QUEUE, 可并发 IMPORT_DL_CONCURRENT): 推磁力 → 等视频落地 → 等下载稳定。
     完成后写 DL_CTX 并转 POST 处理队列 (清理/刮削/strm 严格串行)。"""
+    category = norm_category(category)
     p = Push115()
     try:
         # 从 thread_url 提取 thread_id (网页一键入库时 URL 必然含 thread-xxx 或 tid=xxx,
@@ -1117,7 +1188,7 @@ def _run_import_dl(task_id, thread_id=None, magnet=None, title=None, thread_url=
         #    在任务详情点「✅ 手工确认继续」, 系统跳过推送/等待从处理阶段续跑。
         if not videos:
             DL_CTX[task_id] = {'savepath': savepath, 'title': title, 'kind': kind,
-                               'to_tv_mode': to_tv_mode, 'videos': []}
+                               'to_tv_mode': to_tv_mode, 'videos': [], 'category': category}
             save_task(task_id, status='failed', step='wait_video',
                       msg='离线下载超时(10分钟)未检测到视频文件，可能磁力慢/无速度。请到 115 网盘确认视频是否落地，确认后点任务详情「✅ 手工确认继续」',
                       thread_id=str(thread_id or ''), title=(title or '')[:300])
@@ -1125,20 +1196,21 @@ def _run_import_dl(task_id, thread_id=None, magnet=None, title=None, thread_url=
 
         # 离线下载完成 → 记录上下文, 转 POST 处理队列 (严格串行)
         DL_CTX[task_id] = {'savepath': savepath, 'title': title, 'kind': kind,
-                           'to_tv_mode': to_tv_mode, 'videos': videos}
+                           'to_tv_mode': to_tv_mode, 'videos': videos, 'category': category}
         save_task(task_id, status='running', step='wait',
                   msg=f'离线下载完成({len(videos)} 个视频), 排队等待处理(串行)...',
                   thread_id=str(thread_id or ''), title=(title or '')[:300])
-        _submit_post(_run_import_post, (task_id, thread_id, magnet, title, thread_url, kind))
+        _submit_post(_run_import_post, (task_id, thread_id, magnet, title, thread_url, kind, category))
     except Exception as e:
         log.exception('import dl failed')
         save_task(task_id, status='failed', step='error', msg='离线下载异常: ' + str(e)[:300],
                   thread_id=str(thread_id or ''), title=(title or '')[:300])
 
-def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_url=None, kind=None):
+def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_url=None, kind=None, category=None):
     """处理阶段 (POST_QUEUE, 严格串行 1 worker): 剧集化/清理/文件名/strm/刮削/元数据/预热/Emby 扫库。
     离线下载阶段(DL_QUEUE)完成后自动转此队列; 服务重启恢复处理阶段任务时 DL_CTX 可能缺失,
     此时用 _find_thread_path 重新定位 115 目录并重新扫描视频。"""
+    category = norm_category(category)
     ctx = DL_CTX.pop(task_id, {})
     savepath = ctx.get('savepath') or _find_thread_path(str(thread_id or ''))
     if not savepath:
@@ -1148,6 +1220,10 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
         return
     to_tv_mode = ctx.get('to_tv_mode', (kind == 'non_fanhao' and bool(thread_id)))
     videos = ctx.get('videos') or []
+    # category: 优先上下文 (新任务), 否则从 DB 恢复 (服务重启后恢复任务用, 2026-09-06)
+    category = norm_category(ctx.get('category') or category)
+    # 与 _run_import_dl 保持一致的解析: 后续判断 (thread_id or web_magnets) 需要该变量
+    web_magnets = [m.strip() for m in re.split(r'\n+', magnet or '') if m.strip()]
     p = Push115()
     try:
         # 2.4 非番号 → 剧集: 直接走剧集流程 (重命名 → 浏览器刮削 → SmartStrm tv 任务 → Emby 剧集库)
@@ -1216,12 +1292,12 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
         # 3. 先触发 SmartStrm webhook 生成 strm (让 MDCng 有 strm 可刮削)
         # 增量(2026-08-12): 同 thread 多磁力→多子目录, 只对新单元触发, 避免整个 thread 全扫触发 115 限频
         try:
-            new_units = _smartstrm_new_units(savepath, videos)
+            new_units = _smartstrm_new_units(savepath, videos, category)
             if new_units:
                 trig = []
                 for u in new_units:
                     sub = f'{savepath.rstrip("/")}/{u}'
-                    _trigger_smartstrm(sub)
+                    _trigger_smartstrm(sub, category)
                     trig.append(sub)
                     time.sleep(1)
                 r = {'triggered': trig}
@@ -1267,7 +1343,7 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
         mdc_ok = False
         mdc_msg = ''
         if (thread_id or web_magnets) and not skip_mdc:
-            local_dir = _local_strm_dir(savepath)
+            local_dir = _local_strm_dir(savepath, category)
             save_task(task_id, status='running', step='nfo', msg='等待 MDCng 刮削(原地整理, 最长180s)...',
                       thread_id=thread_id, title=(title or '')[:300])
             # 2026-08-17 加固: MDCng/SmartStrm 链路不健康时直接降级网页兜底, 不白等 180s
@@ -1287,7 +1363,7 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
                 if strm_cnt == 0:
                     log.warning('[import] 本地 strm 为空, 触发 SmartStrm 生成+同步 strm')
                     try:
-                        _trigger_smartstrm(savepath)
+                        _trigger_smartstrm(savepath, category)
                         time.sleep(5)
                         _trigger_smartstrm_sync(savepath)
                         time.sleep(5)
@@ -1298,13 +1374,16 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
                     log.warning('[import] strm 仍未就位(SmartStrm 可能失败), 跳过 MDCng 直接网页兜底')
                     mdc_ok, mdc_msg = False, 'strm 未就位(SmartStrm 失败?), 跳过 MDCng 直接网页兜底'
                 else:
-                    mdc_ok, mdc_msg = _wait_mdc_scrape(local_dir)
+                    mdc_ok, mdc_msg, mdc_dir = _wait_mdc_scrape(local_dir)
             # 完整性检查: 每个影片必须 nfo+图片都齐全, 缺一不可 (用户规则 2026-08-07)
-            ok2, n2, i2 = _has_local_metadata(local_dir)
+            # 硬链接/移动整理模式下 MDC 产物在已刮削区 (mdc_dir), 本地待看区只有 strm,
+            # 完整性/中文标题检查必须针对 mdc_dir, 否则误判"未刮削" (2026-08-31 修复)
+            meta_dir = mdc_dir or local_dir
+            ok2, n2, i2 = _has_local_metadata(meta_dir)
             if mdc_ok and not ok2:
-                mdc_msg = f'MDCng 刮削不完全: 本地 {n2} nfo / {i2} 图片 (需两者齐全), 走浏览器兜底补全'
+                mdc_msg = f'MDCng 刮削不完全: {meta_dir} {n2} nfo / {i2} 图片 (需两者齐全), 走浏览器兜底补全'
                 mdc_ok = False
-            elif mdc_ok and not _mdc_title_has_chinese(local_dir):
+            elif mdc_ok and not _mdc_title_has_chinese(meta_dir):
                 # 用户规则(2026-08-11): MDCng 刮削结果标题无中文字符 → 视为刮错/不准,
                 # 删除 MDCng 元数据(本地+115), 改为网页方式爬取
                 rm = _remove_mdc_metadata(p, local_dir, savepath)
@@ -1379,7 +1458,7 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
 
         # 5.9 补目录同名 nfo (Emby 电影识别/poster 归属, 2026-08-19)
         try:
-            _ensure_dir_nfo(_local_strm_dir(savepath))
+            _ensure_dir_nfo(_local_strm_dir(savepath, category))
         except Exception as _e:
             log.warning('ensure_dir_nfo failed: %s', str(_e)[:100])
 
@@ -1396,7 +1475,7 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
         # 6.5 新入库预热 (2026-08-19): Emby 扫库后对新条目做媒体信息预探测 → 首播秒开
         #     只对本次新入库条目; 存量影片不做 (用户规则 2026-08-19)
         try:
-            _start_prewarm(_local_strm_dir(savepath), task_id, title or '')
+            _start_prewarm(_local_strm_dir(savepath, category), task_id, title or '')
         except Exception as _e:
             log.warning('[prewarm] 启动失败: %s', str(_e)[:120])
     except Exception as e:
@@ -1501,7 +1580,8 @@ def _ensure_post_workers():
 def queued_count():
     return _DL_ACTIVE + POST_QUEUE.qsize()
 
-def start_import(thread_id=None, magnet=None, title=None, thread_url=None, kind=None, task_id=None, resume=False):
+def start_import(thread_id=None, magnet=None, title=None, thread_url=None, kind=None, task_id=None, resume=False, category=None):
+    category = norm_category(category)
     task_id = task_id or uuid.uuid4().hex[:12]
     if _ratelimit_active():
         qmsg = '115 限频中, 任务排队等待, 恢复后自动执行'
@@ -1509,8 +1589,8 @@ def start_import(thread_id=None, magnet=None, title=None, thread_url=None, kind=
         qmsg = '任务已入队(离线下载不限并发), 立即执行'
     save_task(task_id, status='queued', step='init', msg=qmsg,
               thread_id=str(thread_id or ''), magnet=(magnet or '')[:200], title=(title or '')[:300], kind=kind or '',
-              thread_url=(thread_url or '')[:500])
-    _submit_dl(_run_import_dl, (task_id, thread_id, magnet, title, thread_url, kind, resume))
+              category=category, thread_url=(thread_url or '')[:500])
+    _submit_dl(_run_import_dl, (task_id, thread_id, magnet, title, thread_url, kind, resume, category))
     return task_id
 
 def _find_thread_path(thread_id):
@@ -1887,12 +1967,13 @@ def run_rescrape(task_id, thread_id, kind='web'):
             except Exception as e:
                 save_task(task_id, status='running', step='strm', msg='SmartStrm 触发失败(继续等 MDCng): ' + str(e)[:120],
                           thread_id=thread_id, title=title[:300])
-            mdc_ok, mdc_msg = _wait_mdc_scrape(local_dir, timeout=240)
-            ok2, n2, i2 = _has_local_metadata(local_dir)
+            mdc_ok, mdc_msg, mdc_dir = _wait_mdc_scrape(local_dir, timeout=240)
+            meta_dir = mdc_dir or local_dir
+            ok2, n2, i2 = _has_local_metadata(meta_dir)
             if mdc_ok and not ok2:
                 mdc_ok = False
-                mdc_msg = f'MDCng 刮削不完全: 本地 {n2} nfo / {i2} 图片'
-            elif mdc_ok and not _mdc_title_has_chinese(local_dir):
+                mdc_msg = f'MDCng 刮削不完全: {meta_dir} {n2} nfo / {i2} 图片'
+            elif mdc_ok and not _mdc_title_has_chinese(meta_dir):
                 rm2 = _remove_mdc_metadata(p, local_dir, savepath)
                 mdc_ok = False
                 mdc_msg = f'MDCng 刮削标题无中文字符(可能刮错), 已删除元数据{rm2}个; 建议改用网页爬取'
@@ -2613,7 +2694,7 @@ function addTaskRow(taskId, label, status, msg) {
     row.className = 'task-item';
     row.id = 'task-' + taskId;
     row.innerHTML = '<div class="st"><div><b>' + esc(label) + '</b> <span class="badge"></span></div><div class="msg"></div></div>' +
-        '<span class="close" onclick="closeTask('' + taskId + '')">✕</span>';
+        '<span class="close" onclick="closeTask(\'' + taskId + '\')">✕</span>';
     list.appendChild(row);
     updateTaskRow(taskId, status, msg);
 }
@@ -3277,9 +3358,12 @@ class Handler(BaseHTTPRequestHandler):
             if kind not in ('fanhao', 'non_fanhao'):
                 self._json({'error': 'kind 必填, 只能是 fanhao(影片/番号) 或 non_fanhao(剧集/非番号), 已取消自动判定'}, 400)
                 return
+            # category 可选 (2026-09-06): 推送时选分类, 空/非法回退 av(全进已刮削/AV)
+            category = norm_category(body.get('category'))
             if thread_id or magnet:
-                tid = start_import(thread_id=thread_id, magnet=magnet, title=title, thread_url=thread_url, kind=kind)
-                self._json({'task_id': tid, 'thread_id': str(thread_id or ''), 'magnet': (magnet or '')[:60]})
+                tid = start_import(thread_id=thread_id, magnet=magnet, title=title, thread_url=thread_url,
+                                   kind=kind, category=category)
+                self._json({'task_id': tid, 'thread_id': str(thread_id or ''), 'magnet': (magnet or '')[:60], 'category': category})
             else:
                 self._json({'error': '需要 thread_id 或 magnet'}, 400)
             return
@@ -3298,14 +3382,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             conn = sqlite3.connect(LOG_DB)
             try:
-                r = conn.execute('SELECT thread_id, magnet, title, status, kind, thread_url FROM import_log WHERE task_id=?',
+                r = conn.execute('SELECT thread_id, magnet, title, status, kind, thread_url, category FROM import_log WHERE task_id=?',
                                  (task_id,)).fetchone()
             finally:
                 conn.close()
             if not r:
                 self._json({'error': f'任务 {task_id} 不存在'}, 404)
                 return
-            thread_id, magnet, title, old_status, kind, thread_url = r
+            thread_id, magnet, title, old_status, kind, thread_url, category = r
             # kind 缺失(老任务)时按目录位置推断: /sehuatang_tv/ 下为剧集, 否则影片
             if kind not in ('fanhao', 'non_fanhao'):
                 try:
@@ -3314,7 +3398,8 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     kind = 'fanhao'
             tid = start_import(thread_id=str(thread_id or ''), magnet=(magnet or ''),
-                               title=title or '', thread_url=(thread_url or ''), kind=kind, task_id=task_id, resume=True)
+                               title=title or '', thread_url=(thread_url or ''), kind=kind, task_id=task_id, resume=True,
+                               category=category)
             self._json({'task_id': tid, 'old_status': old_status, 'kind': kind, 'resumed': True})
             return
         if path == '/api/import/confirm_video':
@@ -3333,14 +3418,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             conn = sqlite3.connect(LOG_DB)
             try:
-                r = conn.execute('SELECT thread_id, magnet, title, status, kind, thread_url FROM import_log WHERE task_id=?',
+                r = conn.execute('SELECT thread_id, magnet, title, status, kind, thread_url, category FROM import_log WHERE task_id=?',
                                  (task_id,)).fetchone()
             finally:
                 conn.close()
             if not r:
                 self._json({'error': f'任务 {task_id} 不存在'}, 404)
                 return
-            thread_id, magnet, title, old_status, kind, thread_url = r
+            thread_id, magnet, title, old_status, kind, thread_url, category = r
             if kind not in ('fanhao', 'non_fanhao'):
                 try:
                     sp = _find_thread_path(str(thread_id or ''))
@@ -3348,7 +3433,8 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     kind = 'fanhao'
             tid = start_import(thread_id=str(thread_id or ''), magnet=(magnet or ''),
-                               title=title or '', thread_url=(thread_url or ''), kind=kind, task_id=task_id, resume=True)
+                               title=title or '', thread_url=(thread_url or ''), kind=kind, task_id=task_id, resume=True,
+                               category=category)
             self._json({'task_id': tid, 'old_status': old_status, 'kind': kind, 'confirmed': True})
             return
         if path == '/api/import/rescrape':
@@ -3849,7 +3935,7 @@ def _requeue_stale_tasks():
     magnet 传空: 有 thread_id 时走 DB links 表全量磁力, 避免截断磁力漏推。"""
     try:
         c = sqlite3.connect(LOG_DB)
-        rows = c.execute("SELECT task_id, thread_id, magnet, title, kind, step, msg FROM import_log "
+        rows = c.execute("SELECT task_id, thread_id, magnet, title, kind, step, msg, category FROM import_log "
                          "WHERE status IN ('queued','running') ORDER BY created_at").fetchall()
         c.close()
     except Exception as e:
@@ -3859,7 +3945,7 @@ def _requeue_stale_tasks():
         log.info('[startup] 无未完成任务需恢复')
         return
     POST_STEPS = ('scrape', 'nfo', 'strm', 'scan', 'move', 'rename')
-    for task_id, thread_id, magnet, title, kind, step, msg in rows:
+    for task_id, thread_id, magnet, title, kind, step, msg, category in rows:
         m = msg or ''
         # 按任务类型恢复: rescrape/to_tv 走各自流程, 其余走 import (断点续跑)
         if '重新刮削' in m:
@@ -3879,7 +3965,7 @@ def _requeue_stale_tasks():
             save_task(task_id, status='queued', step='init',
                       msg=f'服务重启, 处理阶段任务({step or "?"})重新入队, 跳过下载直接处理',
                       thread_id=str(thread_id or ''), magnet='', title=(title or '')[:300], kind=kind or '')
-            _submit_post(_run_import_post, (task_id, str(thread_id or ''), '', title or '', '', kind or ''))
+            _submit_post(_run_import_post, (task_id, str(thread_id or ''), '', title or '', '', kind or '', category))
             log.info('[startup] 重新入队处理阶段任务 %s (thread=%s step=%s)', task_id, thread_id or '-', step or '?')
             continue
         # 下载阶段 (init/push/wait) → 回离线下载队列 (resume 断点续跑)
@@ -3889,7 +3975,7 @@ def _requeue_stale_tasks():
         save_task(task_id, status='queued', step='init',
                   msg=f'服务重启, 未完成任务({step or "?"})重新入队续跑(离线下载队列)',
                   thread_id=str(thread_id or ''), magnet=(magnet or '')[:200], title=(title or '')[:300], kind=kind or '')
-        _submit_dl(_run_import_dl, (task_id, str(thread_id or ''), magnet or '', title or '', '', kind or '', True))
+        _submit_dl(_run_import_dl, (task_id, str(thread_id or ''), magnet or '', title or '', '', kind or '', True, category))
         log.info('[startup] 重新入队下载阶段任务 %s (thread=%s step=%s)', task_id, thread_id or '-', step or '?')
 
 if __name__ == '__main__':

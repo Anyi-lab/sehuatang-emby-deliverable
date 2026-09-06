@@ -17,7 +17,10 @@ import json
 import time
 import threading
 import unicodedata
+import logging
 from types import SimpleNamespace
+
+log = logging.getLogger('mcp115')
 
 sys.path.insert(0, '/root/clacky_workspace')
 from mcp_lib_115 import McpClient, find_entries, is_file_entry, pick, nfc, norm_name
@@ -39,12 +42,34 @@ def _get_client():
     return _GLOBAL_CLIENT
 
 
+def _rebuild_client():
+    """强制重建全局 MCP 会话 (session 过期/115-Desktop 重启后旧 session 失效, 调用返回 None)"""
+    global _GLOBAL_CLIENT
+    _GLOBAL_CLIENT = McpClient('import-api')
+    return _GLOBAL_CLIENT
+
+
 class MCP115:
     """115 操作适配 (目录解析/文件操作/离线下载/strm 生成)"""
 
     def __init__(self):
         self.c = _get_client()
         self._cid = {}  # path -> cid
+
+    def _call(self, tool, args, retry=2):
+        """MCP 调用 + session 失效自动重建 (115-Desktop 重启/会话过期后旧 session 返回 None,
+        重建全局会话重试一次, 避免整条入库任务失败)"""
+        with _LOCK:
+            r = self.c.call(tool, args, retry=retry)
+        if r is None:
+            log.warning('[mcp115] %s 无响应, 重建 MCP 会话重试', tool)
+            try:
+                self.c = _rebuild_client()
+                with _LOCK:
+                    r = self.c.call(tool, args, retry=retry)
+            except Exception as e:
+                log.warning('[mcp115] 重建 MCP 会话失败: %s', str(e)[:120])
+        return r
 
     # ---------- 路径/目录 ----------
     @staticmethod
@@ -55,8 +80,7 @@ class MCP115:
         """枚举文件夹全部条目 -> [dict(fid,fn,is_dir,size,pc)] (分页拉全)"""
         out, offset = [], 0
         for _ in range(limit_pages):
-            with _LOCK:
-                data = self.c.list_files(str(cid), offset, PAGE)
+            data = self._call('list_files', {'cid': str(cid), 'offset': offset, 'limit': PAGE})
             if data is None:
                 break
             ents = find_entries(data)
@@ -142,8 +166,7 @@ class MCP115:
                 cid = e['fid']
                 self._cid[cur] = cid
                 continue
-            with _LOCK:
-                r = self.c.create_folder(cid, s)
+            r = self._call('create_folder', {'pid': str(cid), 'name': s})
             new_cid = None
             if isinstance(r, dict):
                 new_cid = str(pick(r, ('cid', 'file_id', 'fid', 'id')) or '')
@@ -195,8 +218,7 @@ class MCP115:
                 return False
             ok = False
             if (sp[0] or '/').rstrip('/') == (dp[0] or '/').rstrip('/'):
-                with _LOCK:
-                    r = self.c.rename_file(e['fid'], dp[1])
+                r = self._call('rename_file', {'file_id': e['fid'], 'name': dp[1]})
                 ok = r is not None
             else:
                 dp_cid = self.resolve_cid(dp[0] or '/')
@@ -206,14 +228,12 @@ class MCP115:
                     dp_cid = self.resolve_cid(dp[0])
                 if dp_cid is None:
                     return False
-                with _LOCK:
-                    r1 = self.c.move_files([e['fid']], dp_cid)
+                r1 = self._call('move_files', {'file_ids': [e['fid']], 'to_cid': dp_cid})
                 ok = r1 is not None
                 if ok and dp[1] != e['fn']:
                     e2 = self._find_child(dp_cid, e['fn'])
                     if e2 is not None:
-                        with _LOCK:
-                            self.c.rename_file(e2['fid'], dp[1])
+                        self._call('rename_file', {'file_id': e2['fid'], 'name': dp[1]})
             self._cid.pop(src.rstrip('/'), None)
             return ok
         except Exception:
@@ -230,8 +250,7 @@ class MCP115:
         e = self._find_child(cid, name)
         if e is None:
             return True
-        with _LOCK:
-            r = self.c.delete_files([e['fid']])
+        r = self._call('delete_files', {'file_ids': [e['fid']]})
         self._cid.pop(path.rstrip('/'), None)
         return r is not None
 
@@ -258,10 +277,18 @@ class MCP115:
         cid = self.resolve_cid(savepath)
         if cid is None:
             return False, '解析 115 目录失败', None
-        with _LOCK:
-            r = self.c.call('add_offline_download', {'urls': [link], 'save_dir_id': cid}, retry=3)
+        r = self._call('add_offline_download', {'urls': [link], 'save_dir_id': cid}, retry=3)
         h = self.link_hash(link)
         if r is None:
+            # 115-Desktop MCP 对"任务已存在"返回 {"error":"任务已存在，请勿输入重复的链接地址"},
+            # 被 parse_sse_inner 归一成 None。这里区分: 任务确实已在离线列表 → 返回"任务已存在",
+            # 让上游 push_magnet 走"删旧任务重推"; 列表里也没有 → 才是真的无响应。
+            try:
+                existing = self.get_offline_task(h, max_pages=4)
+            except Exception:
+                existing = None
+            if existing:
+                return False, '任务已存在，请勿输入重复的链接地址', h
             return False, 'MCP add_offline_download 无响应(115-Desktop 未运行?)', h
         if isinstance(r, dict):
             st = r.get('state')
@@ -275,8 +302,7 @@ class MCP115:
         """按 info_hash 查离线任务 (get_offline_tasks 从 page 0 起, 新任务在前)"""
         ih = str(info_hash or '').lower()
         for page in range(max_pages):
-            with _LOCK:
-                r = self.c.call('get_offline_tasks', {'page': page}, retry=2)
+            r = self._call('get_offline_tasks', {'page': page}, retry=2)
             if not isinstance(r, dict):
                 continue
             for t in r.get('tasks', []) or []:
@@ -300,8 +326,7 @@ class MCP115:
         ok = True
         for h in info_hashes or []:
             try:
-                with _LOCK:
-                    r = self.c.call('delete_offline_task', {'info_hash': h}, retry=2)
+                r = self._call('delete_offline_task', {'info_hash': h}, retry=2)
                 if r is None:
                     ok = False
             except Exception:
