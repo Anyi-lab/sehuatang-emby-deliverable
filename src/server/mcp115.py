@@ -340,9 +340,12 @@ class MCP115:
         import urllib.parse
         return f'{STRM_HOST}/d/{pc}/{urllib.parse.quote(name)}'
 
-    def gen_strm(self, savepath, local_root):
+    def gen_strm(self, savepath, local_root, drop_cat_dir=False):
         """为 115 目录 savepath 生成 strm 到本地 local_root 对应子目录 (递归子目录)。
-        返回生成数量。strm 命名: 视频文件名去扩展名 + '.strm'。"""
+        返回生成数量。strm 命名: 视频文件名去扩展名 + '.strm'。
+        drop_cat_dir (2026-09-06): 115 影片路径为 /sehuatang/<分类名>/thread_xxx;
+        当本地 local_root 已是分类专用根 (待看/sehuatang_xxx) 时置 True,
+        再剥掉 <分类名>/ 一层, 避免 待看/sehuatang_lf/里番/ 重复嵌套。"""
         cid = self.resolve_cid(savepath)
         if cid is None:
             return 0
@@ -351,11 +354,14 @@ class MCP115:
             rel = rel[len('sehuatang_tv/'):]
         elif rel.startswith('sehuatang/'):
             rel = rel[len('sehuatang/'):]
+            if drop_cat_dir and '/' in rel:
+                rel = rel.split('/', 1)[1]
         local_dir = os.path.join(local_root, rel) if rel else local_root
         cnt = 0
         for e in self.list_entries(cid):
             if e['is_dir']:
-                cnt += self.gen_strm(f'{savepath.rstrip("/")}/{e["fn"]}', local_root)
+                cnt += self.gen_strm(f'{savepath.rstrip("/")}/{e["fn"]}', local_root,
+                                     drop_cat_dir=drop_cat_dir)
                 continue
             if os.path.splitext(e['fn'])[1].lower() not in MEDIA_EXTS:
                 continue
