@@ -510,7 +510,8 @@ def _trigger_smartstrm(savepath, category=None):
                 if os.path.isdir(os.path.join(sroot, name)):
                     category = key
                     break
-        n = m.gen_strm(savepath, category_strm_root(norm_category(category)))
+        n = m.gen_strm(savepath, category_strm_root(norm_category(category)),
+                       drop_cat_dir=(category_strm_root(norm_category(category)) != LOCAL_STRM_ROOT))
         log.info('[strm] 本地生成 strm %d 个: %s (category=%s)', n, savepath, norm_category(category))
         return {'generated': n}
     except Exception as e:
@@ -713,19 +714,30 @@ def _ensure_dir_nfo(local_dir):
     return False
 
 def _local_strm_dir(savepath, category=None):
-    """115 路径 -> 本地 strm 目录 (本地版: MDCng watch 根):
-    /sehuatang/thread_xxx -> /mnt/g/srtm/待看/sehuatang/thread_xxx (影片, AV)
-    /sehuatang_tv/thread_xxx -> /mnt/g/srtm/待看/sehuatang/thread_xxx (剧集, 同 watch 根)
-    2026-09-06: category 分流 -> /mnt/g/srtm/待看/sehuatang_<分类>/thread_xxx
+    """115 路径 -> 本地 strm 目录 (路径规则与 mcp115.gen_strm 的 drop_cat_dir 完全一致):
+      /sehuatang/AV/thread_xxx   -> 待看/sehuatang/AV/thread_xxx      (av: 本地根镜像整个 115 /sehuatang, 保留分类层)
+      /sehuatang/FC2/thread_xxx  -> 待看/sehuatang_fc2/thread_xxx     (其他分类: 本地根已按分类专用, 剥掉分类层)
+      /sehuatang_tv/thread_xxx   -> 待看/sehuatang/thread_xxx         (剧集, 同 av 根, 无分类层)
     category 未显式传入时按已有本地目录自动探测 (rescrape/prewarm 等存量调用点正确回落到原分类)。"""
-    name = savepath.rstrip('/').split('/')[-1]
     if category is None:
-        for key, (sroot, _t, _n) in CATEGORY_MAP.items():
-            if os.path.isdir(os.path.join(sroot, name)):
+        name = savepath.rstrip('/').split('/')[-1]
+        for key, (sroot, _t, cname) in CATEGORY_MAP.items():
+            if os.path.isdir(os.path.join(sroot, name)) or \
+               os.path.isdir(os.path.join(sroot, cname, name)):
                 category = key
                 break
-    root = category_strm_root(norm_category(category))
-    return f'{root}/{name}'
+    cat = norm_category(category)
+    root = category_strm_root(cat)
+    rel = savepath.strip('/')
+    if rel.startswith('sehuatang_tv/'):
+        rel = rel[len('sehuatang_tv/'):]
+    elif rel.startswith('sehuatang/'):
+        rel = rel[len('sehuatang/'):]
+        # 本地根 == av 通用根(待看/sehuatang) 时保留分类层(镜像 115 /sehuatang 结构);
+        # 专用根(待看/sehuatang_<分类>)时剥掉 <分类名>/ 一层, 避免 sehuatang_lf/里番/ 重复嵌套
+        if root != LOCAL_STRM_ROOT and '/' in rel:
+            rel = rel.split('/', 1)[1]
+    return os.path.join(root, rel)
 
 def _has_local_metadata(local_dir):
     """本地 strm 目录是否已有 nfo/图片 (MDCng 原地整理产物 / SmartStrm 同步产物)"""
