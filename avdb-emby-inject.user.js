@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AVdb → Emby 一键入库 (色花堂点单版)
 // @namespace    sehuatang.emby.deliverable
-// @version      0.2.0
+// @version      0.2.1
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
 // @description  在 AVdb 文章卡片 + 在线资源(online-resources ranking/top/latest) 卡片上注入"→ Emby 入库"按钮。文章卡片直接取缓存 magnet; 在线资源卡片无 magnet, 点击时按番号反查本地库(优先)或拉取 JavDB 磁力, 再推给 import_api (localhost:5081) 全包入库。
@@ -282,18 +282,18 @@
     injecting = true;
     requestAnimationFrame(() => {
       try {
-        const cards = (root || document).querySelectorAll('[data-image-frame]');
-        cards.forEach((card) => {
-          // 已注入跳过; 在线资源页的订阅徽章卡是"订阅容器"不是资源卡, 同样跳过
+        const frames = (root || document).querySelectorAll('[data-image-frame]');
+        frames.forEach((frame) => {
+          // frame 只是封面容器; 实际卡片是最近的 data-slot="card" 父 (番号/标题信息区在 frame 外部)
+          const card = (frame.closest && frame.closest('[data-slot="card"]')) || frame;
+          // 已注入跳过 (订阅徽章按钮 .resource-card-subscription-badge 是普通影片卡的常驻角标, 不是订阅容器)
           if (card.querySelector('.avdb-emby-btn')) return;
           const img = card.querySelector('img[src*="/articles/"], img[data-src*="/articles/"]');
           let tid = img ? tidFromUrl(img.currentSrc || img.src) : null;
           let cardNumber = null;
           if (!tid) {
-            // 在线资源卡片: 封面是 javdb 外链, 从 DOM 找番号 (排除订阅徽章卡: 其无番号文本, 有 badge 元素)
-            const isSubBadge = !!card.querySelector('.resource-card-top-left-badge, .resource-card-top-right-badge');
-            if (!isSubBadge) cardNumber = numberFromCard(card);
-            else card.classList.add('avdb-emby-skip');
+            // 在线资源卡片: 封面是 javdb 外链 (img-proxy), 无本地 tid, 从整卡 DOM 找番号文本
+            cardNumber = numberFromCard(card);
           }
           if (!tid && !cardNumber) return;
 
@@ -399,7 +399,7 @@
               }, 4000);
             }
           });
-          card.appendChild(btn);
+          frame.appendChild(btn);
         });
       } finally {
         injecting = false;
@@ -413,5 +413,5 @@
 
   // 初次注入
   setTimeout(() => injectButtons(document), 1200);
-  console.log('[AVdb-Emby] userscript v0.2.0 loaded. IMPORT_API=' + IMPORT_API);
+  console.log('[AVdb-Emby] userscript v0.2.1 loaded. IMPORT_API=' + IMPORT_API);
 })();
