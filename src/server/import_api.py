@@ -109,6 +109,11 @@ def category_name(cat):
     """分类 -> 显示名"""
     return CATEGORY_MAP.get(cat, CATEGORY_MAP[DEFAULT_CATEGORY])[2]
 
+def _thread_115_path(thread_id, category=None):
+    """影片的 115 落点: 2026-09-06 起按分类建目录 /sehuatang/<分类名>/thread_xxx;
+    未指定分类/默认 av -> /sehuatang/AV/thread_xxx (写函数统一 add_task push 与断点检查)"""
+    return f'{IMPORT_ROOT}/{category_name(category)}/thread_{thread_id}'
+
 def category_of_local_dir(local_dir):
     """本地 strm 目录 -> 所属分类 key (按前缀匹配 watch 根), 默认 av"""
     for key, (sroot, _t, _n) in CATEGORY_MAP.items():
@@ -1102,10 +1107,11 @@ def _run_import_dl(task_id, thread_id=None, magnet=None, title=None, thread_url=
         # 先确定 savepath (提前计算, 供断点重续检查使用;
         #   2026-08-17: 115 目录已有视频时无需磁力即可续跑, 避免磁力选择失败阻塞恢复)
         if thread_id:
-            savepath = f'{IMPORT_TV_ROOT}/thread_{thread_id}' if to_tv_mode else f'{IMPORT_ROOT}/thread_{thread_id}'
+            savepath = f'{IMPORT_TV_ROOT}/thread_{thread_id}' if to_tv_mode else _thread_115_path(thread_id, category)
         elif web_magnets:
             lh = Push115.link_hash(web_magnets[0])
-            savepath = f'{IMPORT_ROOT}/manual_{lh[:8]}' if lh else f'{IMPORT_ROOT}/manual_{str(abs(hash(web_magnets[0])))[:8]}'
+            mn = f'manual_{lh[:8]}' if lh else f'manual_{str(abs(hash(web_magnets[0])))[:8]}'
+            savepath = f'{IMPORT_ROOT}/{category_name(category)}/{mn}'
         else:
             save_task(task_id, status='failed', step='push', msg='缺少磁力/ed2k 链接',
                       thread_id=thread_id, title=title)
@@ -1594,12 +1600,16 @@ def start_import(thread_id=None, magnet=None, title=None, thread_url=None, kind=
     return task_id
 
 def _find_thread_path(thread_id):
-    """定位 thread 的 115 目录: 优先剧集媒体库 /sehuatang_tv/, 否则电影目录 /sehuatang/"""
+    """定位 thread 的 115 目录: 优先剧集媒体库 /sehuatang_tv/, 然后分类目录 /sehuatang/<分类>/, 最后旧平铺 /sehuatang/"""
     p = Push115()
     try:
         fs = p._fs_client()
         if fs.exists(f'{IMPORT_TV_ROOT}/thread_{thread_id}'):
             return f'{IMPORT_TV_ROOT}/thread_{thread_id}'
+        for key in CATEGORY_MAP:
+            cand = f'{IMPORT_ROOT}/{category_name(key)}/thread_{thread_id}'
+            if fs.exists(cand):
+                return cand
         return f'{IMPORT_ROOT}/thread_{thread_id}'
     except Exception:
         return f'{IMPORT_ROOT}/thread_{thread_id}'
@@ -2196,7 +2206,6 @@ def run_to_tv(task_id, thread_id, title=None):
         save_task(task_id, status='failed', step='error', msg='缺少 thread_id')
         return
     savepath = f'{IMPORT_TV_ROOT}/thread_{thread_id}'
-    old_savepath = f'{IMPORT_ROOT}/thread_{thread_id}'
     if not title:
         title = f'thread_{thread_id}'
         try:
@@ -2214,22 +2223,24 @@ def run_to_tv(task_id, thread_id, title=None):
               thread_id=thread_id, title=title[:300])
     try:
         fs = p._fs_client()
-        # 0.0 整个 thread 文件夹移动到剧集媒体库目录 (若仍在电影目录 /sehuatang/ 下)
-        if fs.exists(old_savepath) and not fs.exists(savepath):
+        # 0.0 整个 thread 文件夹移动到剧集媒体库目录 (若还在影片目录 /sehuatang/ 或 /sehuatang/<分类>/ 下)
+        #     _find_thread_path 兼容 2026-09-06 的分类目录布局
+        cur_path = _find_thread_path(thread_id)
+        if cur_path != savepath and fs.exists(cur_path) and not fs.exists(savepath):
             save_task(task_id, status='running', step='move',
-                      msg=f'移动 thread 文件夹到剧集媒体库: {old_savepath} -> {savepath}',
+                      msg=f'移动 thread 文件夹到剧集媒体库: {cur_path} -> {savepath}',
                       thread_id=thread_id, title=title[:300])
-            if fs.rename(old_savepath, savepath):
-                log.info('[totv] 已移动: %s -> %s', old_savepath, savepath)
+            if fs.rename(cur_path, savepath):
+                log.info('[totv] 已移动: %s -> %s', cur_path, savepath)
                 time.sleep(2)
             else:
                 save_task(task_id, status='failed', step='move',
-                          msg=f'移动 thread 文件夹失败: {old_savepath} -> {savepath}',
+                          msg=f'移动 thread 文件夹失败: {cur_path} -> {savepath}',
                           thread_id=thread_id, title=title[:300])
                 return
         elif not fs.exists(savepath):
             save_task(task_id, status='failed', step='move',
-                      msg=f'115 目录不存在: {savepath} (且旧位置 {old_savepath} 也不存在)',
+                      msg=f'115 目录不存在: {savepath} (旧位置 /sehuatang/<分类>/ 或 /sehuatang/ 下也不存在)',
                       thread_id=thread_id, title=title[:300])
             return
         # 0. 校验 115 目录有视频
@@ -2419,23 +2430,24 @@ def run_tv_refresh(task_id, thread_id, title=None):
               thread_id=thread_id, title=title[:300], kind='non_fanhao')
     try:
         fs = p._fs_client()
-        old_savepath = f'{IMPORT_ROOT}/thread_{thread_id}'
-        # 目录兼容 (2026-08-20): 落地后停住等手工整理的剧集若目录还在影片库 /sehuatang/ 下(旧任务), 先移到剧集媒体库
-        if fs.exists(old_savepath) and not fs.exists(savepath):
+        # 目录兼容 (2026-08-20 + 2026-09-06): 落地后停住等手工整理的剧集若目录还在影片库
+        # /sehuatang/ 或 /sehuatang/<分类>/ 下(旧任务), 先移到剧集媒体库
+        cur_path = _find_thread_path(thread_id)
+        if cur_path != savepath and fs.exists(cur_path) and not fs.exists(savepath):
             save_task(task_id, status='running', step='move',
-                      msg=f'移动 thread 文件夹到剧集媒体库: {old_savepath} -> {savepath}',
+                      msg=f'移动 thread 文件夹到剧集媒体库: {cur_path} -> {savepath}',
                       thread_id=thread_id, title=title[:300])
-            if fs.rename(old_savepath, savepath):
-                log.info('[tvref] 已移动: %s -> %s', old_savepath, savepath)
+            if fs.rename(cur_path, savepath):
+                log.info('[tvref] 已移动: %s -> %s', cur_path, savepath)
                 time.sleep(2)
             else:
                 save_task(task_id, status='failed', step='move',
-                          msg=f'移动 thread 文件夹失败: {old_savepath} -> {savepath}',
+                          msg=f'移动 thread 文件夹失败: {cur_path} -> {savepath}',
                           thread_id=thread_id, title=title[:300])
                 return
         elif not fs.exists(savepath):
             save_task(task_id, status='failed', step='wait',
-                      msg=f'115 目录不存在: {savepath} (且旧位置 {old_savepath} 也不存在)',
+                      msg=f'115 目录不存在: {savepath} (旧位置 /sehuatang/<分类>/ 或 /sehuatang/ 下也不存在)',
                       thread_id=thread_id, title=title[:300])
             return
         # 1. 列出视频, 未命名视频重命名接续编号 (逻辑同 run_to_tv step1)
@@ -3743,10 +3755,23 @@ def _parse_strm_115(content):
         parts = [p for p in path.split('/') if p]          # [sehuatang, thread_x, ...]
         if len(parts) < 2:
             return None
-        root = '/' + '/'.join(parts[:2])
+        if parts[0] == 'sehuatang_tv':
+            # 剧集: /sehuatang_tv/thread_x/...
+            idx = 2
+        else:
+            # 影片分类布局 (2026-09-06): /sehuatang/<分类>/thread_x|manual_xxx/...
+            # root_115 取到 thread/manual 目录, 避免分类根被整目录删除
+            idx = 2
+            for i in range(1, len(parts)):
+                if parts[i].startswith(('thread_', 'manual_')):
+                    idx = i + 1
+                    break
+            if idx < 2:
+                idx = 2
+        root = '/' + '/'.join(parts[:idx])
         return {'kind': 'tv' if parts[0] == 'sehuatang_tv' else 'movie',
                 'root_115': root,
-                'file_115': path if len(parts) > 2 else None}
+                'file_115': path if len(parts) > idx else None}
     except Exception as e:
         log.warning('[strm-del] 解析 115 路径失败: %s', str(e)[:100])
         return None
