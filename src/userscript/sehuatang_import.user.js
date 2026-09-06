@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂链接级一键入库(逐条磁力/ed2k) + 元数据补充
 // @namespace    sehuatang-import
-// @version      1.9.10
+// @version      1.10.0
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @source       https://github.com/Anyi-lab/sehuatang-emby-deliverable
@@ -243,7 +243,7 @@
     }
 
     // ===== 提交入库(单条/全部/手动) + 轮询 =====
-    async function submitImport(links, kind, btn, onFinal) {
+    async function submitImport(links, kind, btn, onFinal, category) {
         if (btn) { btn.disabled = true; btn.textContent = '提交中…'; }
         try {
             const body = {
@@ -251,7 +251,8 @@
                 magnet: links.join('\n'),
                 title: document.title,
                 thread_url: location.href,
-                kind: kind || undefined
+                kind: kind || undefined,
+                category: category || undefined
             };
             const r = await api('POST', '/api/import', body);
             if (!r.task_id) throw new Error(r.error || '未返回 task_id');
@@ -425,9 +426,20 @@
             '<div class="sht-pop-title">选择资源类型</div>' +
             '<button class="sht-pop-kind" data-kind="fanhao">番号(电影)</button>' +
             '<button class="sht-pop-kind" data-kind="non_fanhao">非番号(剧集)</button>' +
+            '<div class="sht-pop-cat">' +
+            '  <label>刮削分类</label>' +
+            '  <select class="sht-pop-cat-select">' +
+            '    <option value="av">AV(默认)</option>' +
+            '    <option value="fc2">FC2</option>' +
+            '    <option value="sw">丝袜</option>' +
+            '    <option value="cn">国产自拍</option>' +
+            '    <option value="ea">欧美</option>' +
+            '    <option value="lf">里番</option>' +
+            '  </select>' +
+            '</div>' +
             '<div class="sht-pop-sub">' + it.label + '</div>';
         document.body.appendChild(pop);
-        const pw = pop.offsetWidth || 180;
+        const pw = pop.offsetWidth || 200;
         let left = rect.left;
         let top = rect.bottom + 6;
         if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
@@ -437,8 +449,9 @@
         pop.querySelectorAll('.sht-pop-kind').forEach(k => {
             k.addEventListener('click', () => {
                 const kind = k.dataset.kind;
+                const category = pop.querySelector('.sht-pop-cat-select').value;
                 pop.remove(); pop = null;
-                submitImport([it.norm], kind, btn);
+                submitImport([it.norm], kind, btn, null, category);
             });
         });
         setTimeout(() => {
@@ -476,6 +489,16 @@
             '  <div><span class="sht-modal-kind-label">资源类型：</span>' +
             '    <button class="sht-modal-kind active" data-kind="fanhao">番号(电影)</button>' +
             '    <button class="sht-modal-kind" data-kind="non_fanhao">非番号(剧集)</button>' +
+            '  </div>' +
+            '  <div><span class="sht-modal-kind-label">刮削分类：</span>' +
+            '    <select id="sht-modal-category">' +
+            '      <option value="av">AV(默认)</option>' +
+            '      <option value="fc2">FC2</option>' +
+            '      <option value="sw">丝袜</option>' +
+            '      <option value="cn">国产自拍</option>' +
+            '      <option value="ea">欧美</option>' +
+            '      <option value="lf">里番</option>' +
+            '    </select>' +
             '  </div>' +
             '  <div id="sht-modal-status"></div>' +
             '  <div class="sht-modal-actions">' +
@@ -539,7 +562,7 @@
                 } else {
                     okBtn.disabled = false;
                 }
-            });
+            }, manualMask.querySelector('#sht-modal-category').value);
             if (!manualMask) return;
             okBtn.disabled = false;
         });
@@ -1116,10 +1139,13 @@
 .sht-link-btn:disabled{cursor:wait;opacity:.85}
 .sht-link-btn.sht-done{background:linear-gradient(135deg,#2dc653,#1a7431)}
 .sht-link-btn.sht-fail{background:linear-gradient(135deg,#6c757d,#343a40)}
-.sht-pop{position:fixed;z-index:2147483648;width:180px;background:rgba(15,23,42,.97);border:1px solid #475569;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:10px;font-family:'Segoe UI',system-ui,sans-serif}
+.sht-pop{position:fixed;z-index:2147483648;width:200px;background:rgba(15,23,42,.97);border:1px solid #475569;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:10px;font-family:'Segoe UI',system-ui,sans-serif}
 .sht-pop-title{color:#e2e8f0;font-size:12px;font-weight:700;margin-bottom:8px}
 .sht-pop-kind{display:block;width:100%;margin:4px 0;padding:6px 8px;border:none;border-radius:6px;background:#1e293b;color:#e2e8f0;font-size:12px;cursor:pointer;text-align:left}
 .sht-pop-kind:hover{background:#e63946}
+.sht-pop-cat{margin:8px 0 2px;padding-top:6px;border-top:1px dashed #334155}
+.sht-pop-cat label{display:block;color:#94a3b8;font-size:11px;margin-bottom:4px}
+.sht-pop-cat-select{width:100%;padding:5px 6px;border:none;border-radius:6px;background:#1e293b;color:#e2e8f0;font-size:12px;cursor:pointer}
 .sht-pop-sub{color:#94a3b8;font-size:11px;margin-top:6px;word-break:break-all;max-height:60px;overflow:hidden}
 #sht-mask{position:fixed;inset:0;z-index:2147483649;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px}
 #sht-modal,#sht-meta-modal{width:min(560px,92vw);max-height:82vh;overflow:auto;background:#0f172a;border:1px solid #334155;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.6);padding:14px 16px;font-family:'Segoe UI',system-ui,sans-serif;display:flex;flex-direction:column;gap:10px}
@@ -1164,6 +1190,7 @@
 .sht-modal-kind{padding:5px 12px;border:1px solid #334155;border-radius:8px;background:#1e293b;color:#e2e8f0;font-size:12px;cursor:pointer;margin-right:8px}
 .sht-modal-kind:hover{border-color:#e63946}
 .sht-modal-kind.active{background:#e63946;border-color:#e63946;color:#fff;font-weight:600}
+#sht-modal-category{padding:5px 10px;border:1px solid #334155;border-radius:8px;background:#1e293b;color:#e2e8f0;font-size:12px;cursor:pointer}
 #sht-modal-status{color:#e2e8f0;font-size:12px;min-height:18px;word-break:break-all}
 #sht-modal-status.sht-done{color:#2dc653;font-weight:600}
 #sht-modal-status.sht-fail{color:#ef4444}
