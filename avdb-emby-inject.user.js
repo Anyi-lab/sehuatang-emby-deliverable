@@ -2,6 +2,8 @@
 // @name         AVdb → Emby 一键入库 (色花堂点单版)
 // @namespace    sehuatang.emby.deliverable
 // @version      0.2.0
+// @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
+// @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
 // @description  在 AVdb 文章卡片 + 在线资源(online-resources ranking/top/latest) 卡片上注入"→ Emby 入库"按钮。文章卡片直接取缓存 magnet; 在线资源卡片无 magnet, 点击时按番号反查本地库(优先)或拉取 JavDB 磁力, 再推给 import_api (localhost:5081) 全包入库。
 // @author       clacky
 // @match        http://localhost:8200/*
