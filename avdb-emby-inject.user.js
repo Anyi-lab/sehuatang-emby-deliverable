@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AVdb → Emby 一键入库 (色花堂点单版)
 // @namespace    sehuatang.emby.deliverable
-// @version      0.3.1
+// @version      0.3.2
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
-// @description  在 AVdb 文章卡片 + 在线资源(online-resources ranking/top/latest)卡片 + 磁力详情页(online-resources?movie=)上注入"→ Emby 入库"按钮。文章卡片直接取缓存 magnet; 在线资源卡片按番号反查本地库(优先)或拉取 JavDB 磁力; 磁力详情页对资源库磁力(色花堂)与在线磁链(javdb)逐条注入, 每条一键入库。再推给 import_api (localhost:5081) 全包入库; 入库时从下拉选落地分类(AV/FC2/丝袜/国产自拍/欧美/里番, 可选自定义)。
+// @description  在 AVdb 文章卡片 + 在线资源(online-resources ranking/top/latest)卡片 + 磁力详情页(online-resources?movie=)上注入"→ Emby 入库"按钮。文章卡片直接取缓存 magnet; 在线资源卡片按番号反查本地库(优先)或拉取 JavDB 磁力; 磁力详情页对资源库磁力(色花堂)、在线磁链(javdb magnets)与评论区资源(javdb comment-resources, 含磁力/ED2K)逐条注入, 每条一键入库。再推给 import_api (localhost:5081) 全包入库; 入库时从下拉选落地分类(AV/FC2/丝袜/国产自拍/欧美/里番, 可选自定义)。
 // @author       clacky
 // @match        http://localhost:8200/*
 // @match        http://127.0.0.1:8200/*
@@ -461,13 +461,14 @@
   }
 
   // ---------- 详情页数据加载 ----------
-  const detailState = { movieId: null, number: '', articles: [], magnets: [] };
+  const detailState = { movieId: null, number: '', articles: [], magnets: [], resources: [] };
   async function loadDetailData(movieId) {
     const st = {
       movieId,
       number: '',
       articles: [],   // 资源库磁力 (本地 article, 含 magnet/tid/category)
-      magnets: [],    // 在线磁链 (javdb, 含 magnet_url)
+      magnets: [],    // 在线磁链 (javdb 标准磁力区, 含 magnet_url)
+      resources: [],  // 评论区资源 (javdb comment-resources, 含 magnet/ed2k: resource_url/name)
     };
     // 1) javdb movie -> 番号
     try {
@@ -475,12 +476,19 @@
       const d = await r.json();
       if (d && d.data && d.data.movie) st.number = d.data.movie.number || '';
     } catch (e) { /* ignore */ }
-    // 2) 在线磁链: GET /javdb/movies/{id}/magnets
+    // 2a) 在线磁链: GET /javdb/movies/{id}/magnets (标准磁力区)
     try {
       const r = await fetch('/api/v1/javdb/movies/' + encodeURIComponent(movieId) + '/magnets', { credentials: 'include' });
       const d = await r.json();
       const mags = (d && d.data && (d.data.magnets || d.data.items)) || [];
       if (Array.isArray(mags)) st.magnets = mags;
+    } catch (e) { /* ignore */ }
+    // 2b) 评论区资源: GET /javdb/movies/{id}/comment-resources (playback 播放页等展示的评论区磁力/ed2k)
+    try {
+      const r = await fetch('/api/v1/javdb/movies/' + encodeURIComponent(movieId) + '/comment-resources', { credentials: 'include' });
+      const d = await r.json();
+      const res = (d && d.data && (d.data.resources || d.data.items)) || [];
+      if (Array.isArray(res)) st.resources = res;
     } catch (e) { /* ignore */ }
     // 3) 资源库磁力: POST /articles/search {keyword:番号}
     if (st.number) {
@@ -495,6 +503,36 @@
       } catch (e) { /* ignore */ }
     }
     return st;
+  }
+
+  // 在线磁链候选: 标准磁力区 + 评论区资源, 统一成 { href, name } 列表 (优先标准磁力, 其次评论区)
+  function onlineMagnetCandidates(st) {
+    const out = [];
+    (st.magnets || []).forEach((m) => {
+      const u = m && (m.magnet_url || m.magnet || m.link || m.url || '');
+      if (u && /^(magnet:|ed2k:)/i.test(u)) out.push({ href: u, name: m.name || m.title || '', key: (m.hash || m.btih || '').toLowerCase() });
+    });
+    (st.resources || []).forEach((r) => {
+      const u = r && (r.resource_url || r.url || '');
+      if (u && /^(magnet:|ed2k:)/i.test(u)) out.push({ href: u, name: r.name || '', key: String(r.hash || '').toLowerCase() });
+    });
+    return out;
+  }
+
+  // 用卡片文本找匹配的在线磁力 (评论资源名/哈希会显示在卡上; 匹配不上 fallback 按序)
+  function matchOnlineMagnetByCard(card, candidates, fallbackIndex) {
+    const text = (card.textContent || '').trim().toLowerCase();
+    // 1) 文本里出现磁力/ed2k 哈希 (btih 40hex 或 ed2k 32hex)
+    for (const c of candidates) {
+      if (c.key && text.includes(c.key)) return c;
+    }
+    // 2) 文件名包含匹配 (卡片显示资源名)
+    for (const c of candidates) {
+      const n = String(c.name || '').toLowerCase().replace(/\s+/g, '');
+      if (n && n.length > 4 && text.replace(/\s+/g, '').includes(n)) return c;
+    }
+    // 3) 按序 fallback
+    return candidates[fallbackIndex] || null;
   }
 
   // ---------- 详情页: 磁力卡片容器 ----------
@@ -626,17 +664,17 @@
       });
     }
 
-    // 在线磁链 section
+    // 在线磁链 section (标准磁力区 + 评论区磁力/ed2k, 卡片文本匹配取磁力)
     const onlSec = sectionByTitle('在线磁链');
     if (onlSec) {
       const cards = cardsInSection(onlSec);
+      const candidates = onlineMagnetCandidates(st);
       cards.forEach((card, i) => {
         if (btnInCard(card)) return;
-        const mag = st.magnets[i];
-        const url = mag && (mag.magnet_url || mag.magnet || '');
+        const cand = matchOnlineMagnetByCard(card, candidates, i);
         makeDetailBtn(card, async () => {
-          if (!mag || !url) return null;
-          return { source: 'javdb', magnet: url, tid: null, title: mag.name || st.number || '', url: null };
+          if (!cand) return null;
+          return { source: 'javdb', magnet: cand.href, tid: null, title: cand.name || st.number || '', url: null };
         });
       });
     }
@@ -654,5 +692,5 @@
     injectButtons(document);
     injectDetailButtons();
   }, 1200);
-  console.log('[AVdb-Emby] userscript v0.3.1 loaded. IMPORT_API=' + IMPORT_API);
+  console.log('[AVdb-Emby] userscript v0.3.2 loaded. IMPORT_API=' + IMPORT_API);
 })();
