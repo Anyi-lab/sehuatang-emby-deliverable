@@ -1378,7 +1378,7 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
                     strm_cnt = _count_local_strm(local_dir)
                 if strm_cnt == 0:
                     log.warning('[import] strm 仍未就位(SmartStrm 可能失败), 跳过 MDCng 直接网页兜底')
-                    mdc_ok, mdc_msg = False, 'strm 未就位(SmartStrm 失败?), 跳过 MDCng 直接网页兜底'
+                    mdc_ok, mdc_msg, mdc_dir = False, 'strm 未就位(SmartStrm 失败?), 跳过 MDCng 直接网页兜底', None
                 else:
                     mdc_ok, mdc_msg, mdc_dir = _wait_mdc_scrape(local_dir)
             # 完整性检查: 每个影片必须 nfo+图片都齐全, 缺一不可 (用户规则 2026-08-07)
