@@ -922,25 +922,86 @@ def _find_mdc_output(cands, recent_min=20, root=None):
             return True, dp
     return False, ''
 
+_MDC_RETRY_PREFIX = '.mdc-retry-'
+
+def _trigger_mdc_retry(local_dir):
+    """MDCng 监控器按 source_path 去重: 同名 strm 覆盖写不触发重新刮削 (2026-09-06 实测,
+    08:59 失败任务同路径 16:59 覆盖写完全无反应)。复制一个含番号的唯一文件名 strm
+    强制触发监控器(模拟新增文件, 新路径必入队)。返回 redo 路径或 None"""
+    try:
+        if not os.path.isdir(local_dir):
+            return None
+        # 清理本目录旧 redo 残留 (多任务共用目录时由调用方负责, 影片目录粒度足够)
+        for f in os.listdir(local_dir):
+            if _MDC_RETRY_PREFIX in f:
+                try:
+                    os.remove(os.path.join(local_dir, f))
+                except Exception:
+                    pass
+        strms = sorted(f for f in os.listdir(local_dir) if f.lower().endswith('.strm'))
+        if not strms:
+            return None
+        src = os.path.join(local_dir, strms[0])
+        stem, ext = os.path.splitext(strms[0])
+        redo_name = f'{stem}{_MDC_RETRY_PREFIX}{int(time.time())}{ext}'
+        redo_path = os.path.join(local_dir, redo_name)
+        with open(src, 'rb') as fsrc:
+            data = fsrc.read()
+        if not data:
+            return None
+        with open(redo_path, 'wb') as fdst:
+            fdst.write(data)
+        return redo_path
+    except Exception as e:
+        log.warning('[mdc-retry] 创建重触发文件失败: %s', str(e)[:100])
+        return None
+
+def _clean_mdc_retry(redo_paths):
+    """删除重触发用 redo 文件 (MDCng 硬链接产物在目标区, 源头 redo 只是哨兵, 需清理)"""
+    for p in redo_paths:
+        try:
+            if p and os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
+    redo_paths.clear()
+
 def _wait_mdc_scrape(local_dir, timeout=300):
     """本地版: 等 MDCng 刮削完成。两种形态都覆盖, 返回 (ok, msg, mdc_dir):
     ① 原地刮削 (nfo/图片写进 local_dir) → mdc_dir=local_dir
     ② 移动式/硬链接整理 (刮削产物在 已刮削/<分类>/<系列>/<番号>/) → mdc_dir=目标区匹配目录
     mdc_dir 供后续完整性/中文标题检查使用 (硬链接模式本地待看区只有 strm, 元数据在目标区)。
-    2026-09-06: 目标区按 local_dir 所属分类 (已刮削/<分类>) 扫描。"""
+    2026-09-06: 目标区按 local_dir 所属分类 (已刮削/<分类>) 扫描。
+    2026-09-06 增强: 等待 60s 仍无刮削痕迹时自动创建唯一文件名 strm 强制触发 MDCng
+    (同路径旧任务去重不重刮的场景自救), 触发文件成功后清理。"""
     cands = _extract_fanhao_candidates(local_dir)
     target_root = category_target_root(category_of_local_dir(local_dir))
     deadline = time.time() + timeout
-    while time.time() < deadline:
-        # ① 原地刮削
-        ok, n, i = _has_local_metadata(local_dir)
-        if ok:
-            return True, f'MDCng 原地刮削完成: {n} nfo, {i} 图片', local_dir
-        # ② 移动式: 目标区出现匹配番号的刮削结果
-        ok2, found = _find_mdc_output(cands, root=target_root)
-        if ok2:
-            return True, f'MDCng 刮削完成并移入: {found}', found
-        time.sleep(5)
+    t0 = time.time()
+    redo_paths = []
+    retried = False
+    try:
+        while time.time() < deadline:
+            # ① 原地刮削
+            ok, n, i = _has_local_metadata(local_dir)
+            if ok:
+                _clean_mdc_retry(redo_paths)
+                return True, f'MDCng 原地刮削完成: {n} nfo, {i} 图片', local_dir
+            # ② 移动式: 目标区出现匹配番号的刮削结果
+            ok2, found = _find_mdc_output(cands, root=target_root)
+            if ok2:
+                _clean_mdc_retry(redo_paths)
+                return True, f'MDCng 刮削完成并移入: {found}', found
+            # ③ 60s 仍无痕迹 → 强制重触发 (MDCng 对同路径旧文件去重)
+            if not retried and time.time() - t0 > 60:
+                rp = _trigger_mdc_retry(local_dir)
+                if rp:
+                    redo_paths.append(rp)
+                    retried = True
+                    log.warning('[mdc-retry] MDCng 60s 未处理 %s, 已创建重触发文件 %s', local_dir, rp)
+            time.sleep(5)
+    finally:
+        _clean_mdc_retry(redo_paths)
     _, n, i = _has_local_metadata(local_dir)
     _ok2, found = _find_mdc_output(cands, root=target_root)
     extra = f'; 目标区未匹配' if not found else f'; 目标区: {found}'
