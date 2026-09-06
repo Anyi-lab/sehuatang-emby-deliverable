@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AVdb → Emby 一键入库 (色花堂点单版)
 // @namespace    sehuatang.emby.deliverable
-// @version      0.3.0
+// @version      0.3.1
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
-// @description  在 AVdb 文章卡片 + 在线资源(online-resources ranking/top/latest)卡片 + 磁力详情页(online-resources?movie=)上注入"→ Emby 入库"按钮。文章卡片直接取缓存 magnet; 在线资源卡片按番号反查本地库(优先)或拉取 JavDB 磁力; 磁力详情页对资源库磁力(色花堂)与在线磁链(javdb)逐条注入, 每条一键入库。再推给 import_api (localhost:5081) 全包入库。
+// @description  在 AVdb 文章卡片 + 在线资源(online-resources ranking/top/latest)卡片 + 磁力详情页(online-resources?movie=)上注入"→ Emby 入库"按钮。文章卡片直接取缓存 magnet; 在线资源卡片按番号反查本地库(优先)或拉取 JavDB 磁力; 磁力详情页对资源库磁力(色花堂)与在线磁链(javdb)逐条注入, 每条一键入库。再推给 import_api (localhost:5081) 全包入库; 入库时从下拉选落地分类(AV/FC2/丝袜/国产自拍/欧美/里番, 可选自定义)。
 // @author       clacky
 // @match        http://localhost:8200/*
 // @match        http://127.0.0.1:8200/*
@@ -20,6 +20,18 @@
   // ---------- 配置 ----------
   const IMPORT_API = 'http://localhost:5081';   // import_api 地址 (浏览器侧可达)
   const JAVDB_MOVIE_MAX_RANK_CACHE = 1000;     // 在线资源 movie 缓存上限
+
+  // 入库分类选项 (与 import_api CATEGORY_MAP 保持一致, 决定 strm 落地/已刮削目录分流)
+  // key -> 显示名; norm_category 会把非法/空回退到 av
+  const CATEGORY_OPTIONS = [
+    { key: 'av',  name: 'AV (默认)' },
+    { key: 'fc2', name: 'FC2' },
+    { key: 'sw',  name: '丝袜' },
+    { key: 'cn',  name: '国产自拍' },
+    { key: 'ea',  name: '欧美' },
+    { key: 'lf',  name: '里番' },
+    { key: '__custom__', name: '自定义…' },
+  ];
 
   // ---------- 数据缓存 ----------
   // articleMap: tid -> article (来自 POST /articles/search)
@@ -123,6 +135,7 @@
       width:100%; box-sizing:border-box; padding:7px 9px; border-radius:8px;
       border:1px solid #4b5563; background:#111827; color:#e5e7eb; font-size:13px;
     }
+    .avdb-emby-modal .hidden { display:none; }
     .avdb-emby-modal .row { display:flex; gap:10px; justify-content:flex-end; margin-top:18px; }
     .avdb-emby-modal button {
       padding:7px 16px; border-radius:8px; border:none; cursor:pointer; font-size:13px; font-weight:600;
@@ -206,6 +219,9 @@
       const overlay = document.createElement('div');
       overlay.className = 'avdb-emby-modal-overlay';
       const autoKind = /^[a-z0-9]{1,12}-\d{2,8}/i.test(String(payload.number || '').trim()) ? 'fanhao' : 'non_fanhao';
+      const catOptionsHtml = CATEGORY_OPTIONS.map((o) =>
+        `<option value="${o.key}">${escapeHtml(o.name)}</option>`
+      ).join('');
       overlay.innerHTML = `
         <div class="avdb-emby-modal">
           <h3>推送到 Emby 入库</h3>
@@ -216,8 +232,9 @@
             <option value="fanhao" ${autoKind === 'fanhao' ? 'selected' : ''}>fanhao (影片 / 番号)</option>
             <option value="non_fanhao" ${autoKind === 'non_fanhao' ? 'selected' : ''}>non_fanhao (剧集 / 非番号)</option>
           </select>
-          <label>分类 (可选, 空=回退 av)</label>
-          <input type="text" id="avdb-emby-cat" placeholder="如: 3dh(3D) / fc2 / 剧情 / 无码 ... 留空自动" />
+          <label>分类 (决定落地到已刮削哪个目录)</label>
+          <select id="avdb-emby-cat">${catOptionsHtml}</select>
+          <input type="text" id="avdb-emby-cat-custom" class="hidden" placeholder="输入自定义分类 key, 如: 剧情 / fc2 / 无码" />
           <div class="row">
             <button class="cancel" id="avdb-emby-cancel">取消</button>
             <button class="go" id="avdb-emby-go">开始入库</button>
@@ -226,10 +243,19 @@
       document.body.appendChild(overlay);
       const close = (v) => { overlay.remove(); resolve(v); };
       overlay.querySelector('#avdb-emby-cancel').addEventListener('click', () => close(null));
+      // 选"自定义…"时显示输入框, 方便输入任意分类 key
+      const catSel = overlay.querySelector('#avdb-emby-cat');
+      const catCustom = overlay.querySelector('#avdb-emby-cat-custom');
+      catSel.addEventListener('change', () => {
+        catCustom.classList.toggle('hidden', catSel.value !== '__custom__');
+        if (catSel.value !== '__custom__') catCustom.value = '';
+      });
       overlay.querySelector('#avdb-emby-go').addEventListener('click', () => {
+        let catVal = catSel.value;
+        if (catVal === '__custom__') catVal = catCustom.value.trim();
         close({
           kind: overlay.querySelector('#avdb-emby-kind').value,
-          category: overlay.querySelector('#avdb-emby-cat').value.trim() || undefined,
+          category: catVal || undefined,
         });
       });
       overlay.addEventListener('click', (e) => { if (e.target === overlay) close(null); });
@@ -628,5 +654,5 @@
     injectButtons(document);
     injectDetailButtons();
   }, 1200);
-  console.log('[AVdb-Emby] userscript v0.3.0 loaded. IMPORT_API=' + IMPORT_API);
+  console.log('[AVdb-Emby] userscript v0.3.1 loaded. IMPORT_API=' + IMPORT_API);
 })();
