@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AVdb → Emby 一键入库 (色花堂点单版)
 // @namespace    sehuatang.emby.deliverable
-// @version      0.2.1
+// @version      0.3.0
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
-// @description  在 AVdb 文章卡片 + 在线资源(online-resources ranking/top/latest) 卡片上注入"→ Emby 入库"按钮。文章卡片直接取缓存 magnet; 在线资源卡片无 magnet, 点击时按番号反查本地库(优先)或拉取 JavDB 磁力, 再推给 import_api (localhost:5081) 全包入库。
+// @description  在 AVdb 文章卡片 + 在线资源(online-resources ranking/top/latest)卡片 + 磁力详情页(online-resources?movie=)上注入"→ Emby 入库"按钮。文章卡片直接取缓存 magnet; 在线资源卡片按番号反查本地库(优先)或拉取 JavDB 磁力; 磁力详情页对资源库磁力(色花堂)与在线磁链(javdb)逐条注入, 每条一键入库。再推给 import_api (localhost:5081) 全包入库。
 // @author       clacky
 // @match        http://localhost:8200/*
 // @match        http://127.0.0.1:8200/*
@@ -148,6 +148,12 @@
   function tidFromUrl(src) {
     const m = (src || '').match(/\/articles\/(\d+)\/image/);
     return m ? m[1] : null;
+  }
+
+  // 从 cookie 读 JWT (前端 axios 同样用它加 Authorization: Bearer, 用于 /api/v1/articles/* 鉴权)
+  function getJwtToken() {
+    const m = document.cookie.match(/(?:^|;\s*)jwt_token=([^;]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
   }
 
   // 卡片内找番号文本 (在线资源卡片没有本地 tid, 从 DOM 文本提取番号)
@@ -407,11 +413,220 @@
     });
   }
 
+  // ==========================================================
+  //  在线资源「磁力详情页」注入 (online-resources?movie=xxx)
+  //  两类磁力逐条注入: 资源库磁力(色花堂/articles) + 在线磁链(javdb/magnets)
+  // ==========================================================
+  function isMovieDetail() {
+    return /\/online-resources(\/|$)/.test(location.pathname) && /[?&]movie=/.test(location.search);
+  }
+  function movieIdFromUrl() {
+    const m = location.search.match(/[?&]movie=([^&]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+
+  // 同源 fetch 公共头 (夹 JWT)
+  function authFetch(url, opts) {
+    const headers = Object.assign({}, (opts && opts.headers) || {});
+    const tok = getJwtToken();
+    if (tok) headers['Authorization'] = 'Bearer ' + tok;
+    if (opts && opts.body) headers['Content-Type'] = 'application/json';
+    return fetch(url, Object.assign({ credentials: 'include' }, opts, { headers }));
+  }
+
+  // ---------- 详情页数据加载 ----------
+  const detailState = { movieId: null, number: '', articles: [], magnets: [] };
+  async function loadDetailData(movieId) {
+    const st = {
+      movieId,
+      number: '',
+      articles: [],   // 资源库磁力 (本地 article, 含 magnet/tid/category)
+      magnets: [],    // 在线磁链 (javdb, 含 magnet_url)
+    };
+    // 1) javdb movie -> 番号
+    try {
+      const r = await fetch('/api/v1/javdb/movies/' + encodeURIComponent(movieId), { credentials: 'include' });
+      const d = await r.json();
+      if (d && d.data && d.data.movie) st.number = d.data.movie.number || '';
+    } catch (e) { /* ignore */ }
+    // 2) 在线磁链: GET /javdb/movies/{id}/magnets
+    try {
+      const r = await fetch('/api/v1/javdb/movies/' + encodeURIComponent(movieId) + '/magnets', { credentials: 'include' });
+      const d = await r.json();
+      const mags = (d && d.data && (d.data.magnets || d.data.items)) || [];
+      if (Array.isArray(mags)) st.magnets = mags;
+    } catch (e) { /* ignore */ }
+    // 3) 资源库磁力: POST /articles/search {keyword:番号}
+    if (st.number) {
+      try {
+        const r = await authFetch('/api/v1/articles/search', {
+          method: 'POST',
+          body: JSON.stringify({ keyword: st.number, page: 1, page_size: 50 }),
+        });
+        const d = await r.json();
+        const items = (d && d.data && d.data.items) || [];
+        if (Array.isArray(items)) st.articles = items;
+      } catch (e) { /* ignore */ }
+    }
+    return st;
+  }
+
+  // ---------- 详情页: 磁力卡片容器 ----------
+  // 磁力区 section: "资源库磁力资源" / "在线磁链资源"
+  function magnetCardSelector() {
+    return 'div.rounded-xl.border';
+  }
+  function sectionByTitle(titleText) {
+    const secs = [...document.querySelectorAll('section.space-y-3')];
+    return secs.find((s) => (s.textContent || '').trim().startsWith(titleText));
+  }
+  // 卡片顺序 (与数据数组按序对应)
+  function cardsInSection(sec) {
+    if (!sec) return [];
+    return [...sec.querySelectorAll(magnetCardSelector())]
+      .filter((c) => {
+        const cls = (c.className || '').toString();
+        return cls.includes('bg-muted/20') && cls.includes('p-3');
+      })
+      .filter((c) => !c.querySelector('.avdb-emby-btn'));
+  }
+
+  // ---------- 详情页按钮逻辑 (逐条) ----------
+  function makeDetailBtn(card, getMagnet) {
+    const btn = document.createElement('button');
+    btn.className = 'avdb-emby-btn';
+    btn.textContent = '→ Emby';
+    btn.style.position = 'static';
+    btn.style.display = 'inline-flex';
+    const actionsWrap = card.querySelector('.grid.w-full.grid-cols-2.gap-2, div[class*="gap-2"]');
+    if (actionsWrap) {
+      btn.style.marginLeft = '4px';
+      actionsWrap.appendChild(btn);
+    } else {
+      card.appendChild(btn);
+    }
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      ev.preventDefault();
+      if (btn.disabled) return;
+      btn.textContent = '拉磁力…';
+      btn.disabled = true;
+      btn.classList.add('avdb-emby-busy');
+      const magnetInfo = await getMagnet();
+      btn.disabled = false;
+      if (!magnetInfo || !magnetInfo.magnet) {
+        btn.textContent = '✗ 无磁力';
+        btn.classList.add('avdb-emby-fail');
+        toast('入库失败: 该条磁力获取不到链接', 'err');
+        setTimeout(() => { btn.textContent = '→ Emby'; btn.classList.remove('avdb-emby-fail'); }, 5000);
+        return;
+      }
+      const payload = {
+        source: magnetInfo.source,
+        number: detailState.number,
+        thread_id: magnetInfo.tid ? String(magnetInfo.tid) : (movieIdFromUrl() || ''),
+        title: magnetInfo.title || '',
+        magnet: magnetInfo.magnet,
+      };
+      const opts = await askKind(payload);
+      if (!opts) { btn.textContent = '→ Emby'; btn.classList.remove('avdb-emby-busy'); return; }
+
+      btn.disabled = true;
+      btn.textContent = '提交中…';
+      btn.classList.add('avdb-emby-busy');
+      try {
+        const body = {
+          thread_id: payload.thread_id,
+          magnet: payload.magnet,
+          title: payload.title,
+          thread_url: magnetInfo.url || ('https://javdb.com/v/' + movieIdFromUrl()),
+          kind: opts.kind,
+        };
+        if (opts.category) body.category = opts.category;
+        const { taskId } = await callImport(body);
+        btn.textContent = '推送中 ' + taskId.slice(0, 8) + '…';
+        toast('已提交入库, task_id=' + taskId + '\n链路: 推115 → 落地 → 刮削 → strm → Emby', 'ok');
+        const rr = await pollStatus(taskId);
+        if (rr && rr.done) {
+          btn.textContent = '✓ 已入库'; btn.classList.replace('avdb-emby-busy', 'avdb-emby-ok');
+        } else if (rr && rr.done === false) {
+          btn.textContent = '✗ 失败'; btn.classList.replace('avdb-emby-busy', 'avdb-emby-fail');
+          toast('入库失败: ' + (rr.data && rr.data.msg || ''), 'err');
+        } else {
+          btn.textContent = '… 轮询超时';
+          toast('仍在入库中, task_id=' + taskId, 'ok');
+        }
+      } catch (e) {
+        btn.textContent = '✗ 失败'; btn.classList.add('avdb-emby-fail');
+        toast('提交失败: ' + e.message, 'err');
+      } finally {
+        btn.disabled = false;
+        setTimeout(() => {
+          btn.textContent = '→ Emby';
+          btn.classList.remove('avdb-emby-ok', 'avdb-emby-fail', 'avdb-emby-busy');
+        }, 4000);
+      }
+    });
+  }
+
+  // ---------- 详情页: 扫描并注入 ----------
+  let detailInjectedMovies = new Set();
+  async function injectDetailButtons() {
+    if (!isMovieDetail()) return;
+    const movieId = movieIdFromUrl();
+    if (!movieId) return;
+
+    // 加载/复用数据
+    if (detailState.movieId !== movieId) {
+      detailState.movieId = movieId;
+      Object.assign(detailState, await loadDetailData(movieId));
+    }
+    const st = detailState;
+
+    const btnInCard = (card) => !!card.querySelector('.avdb-emby-btn');
+
+    // 资源库磁力 section
+    const libSec = sectionByTitle('资源库磁力');
+    if (libSec) {
+      const cards = cardsInSection(libSec);
+      cards.forEach((card, i) => {
+        if (btnInCard(card)) return;
+        const art = st.articles[i];
+        const magnet = art && art.magnet;
+        makeDetailBtn(card, async () => {
+          if (!art || !magnet) return null;
+          return { source: 'article', magnet, tid: art.tid, title: art.title || art.number || '', url: art.detail_url };
+        });
+      });
+    }
+
+    // 在线磁链 section
+    const onlSec = sectionByTitle('在线磁链');
+    if (onlSec) {
+      const cards = cardsInSection(onlSec);
+      cards.forEach((card, i) => {
+        if (btnInCard(card)) return;
+        const mag = st.magnets[i];
+        const url = mag && (mag.magnet_url || mag.magnet || '');
+        makeDetailBtn(card, async () => {
+          if (!mag || !url) return null;
+          return { source: 'javdb', magnet: url, tid: null, title: mag.name || st.number || '', url: null };
+        });
+      });
+    }
+  }
+
   // ---------- 监听卡片容器变化 (虚拟滚动等) ----------
-  const mo = new MutationObserver(() => injectButtons(document));
+  const mo = new MutationObserver(() => {
+    injectButtons(document);
+    if (isMovieDetail()) injectDetailButtons();
+  });
   mo.observe(document.body, { childList: true, subtree: true });
 
   // 初次注入
-  setTimeout(() => injectButtons(document), 1200);
-  console.log('[AVdb-Emby] userscript v0.2.1 loaded. IMPORT_API=' + IMPORT_API);
+  setTimeout(() => {
+    injectButtons(document);
+    injectDetailButtons();
+  }, 1200);
+  console.log('[AVdb-Emby] userscript v0.3.0 loaded. IMPORT_API=' + IMPORT_API);
 })();
