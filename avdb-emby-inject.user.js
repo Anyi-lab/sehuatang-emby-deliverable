@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AVdb → Emby 一键入库 (色花堂点单版)
 // @namespace    sehuatang.emby.deliverable
-// @version      0.3.2
+// @version      0.3.3
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
 // @description  在 AVdb 文章卡片 + 在线资源(online-resources ranking/top/latest)卡片 + 磁力详情页(online-resources?movie=)上注入"→ Emby 入库"按钮。文章卡片直接取缓存 magnet; 在线资源卡片按番号反查本地库(优先)或拉取 JavDB 磁力; 磁力详情页对资源库磁力(色花堂)、在线磁链(javdb magnets)与评论区资源(javdb comment-resources, 含磁力/ED2K)逐条注入, 每条一键入库。再推给 import_api (localhost:5081) 全包入库; 入库时从下拉选落地分类(AV/FC2/丝袜/国产自拍/欧美/里番, 可选自定义)。
@@ -634,47 +634,56 @@
   }
 
   // ---------- 详情页: 扫描并注入 ----------
-  let detailInjectedMovies = new Set();
+  // 数据加载 promise 去重: 防止 MutationObserver 多次触发时,
+  // detailState.movieId 已被赋值但数据还在 await 中, 用空 detailState 注入按钮
+  // (导致按钮闭包捕获 cand=null, 点击必报"该条磁力获取不到链接")。
+  let detailLoadPromise = null;
+  async function ensureDetailData(movieId) {
+    if (detailState.movieId !== movieId || !detailLoadPromise) {
+      detailState.movieId = movieId;
+      detailLoadPromise = loadDetailData(movieId);
+    }
+    const fresh = await detailLoadPromise;   // 并发触发者共用同一个 promise
+    Object.assign(detailState, fresh);
+    return detailState;
+  }
+
   async function injectDetailButtons() {
     if (!isMovieDetail()) return;
     const movieId = movieIdFromUrl();
     if (!movieId) return;
 
-    // 加载/复用数据
-    if (detailState.movieId !== movieId) {
-      detailState.movieId = movieId;
-      Object.assign(detailState, await loadDetailData(movieId));
-    }
-    const st = detailState;
+    // 数据就绪后再注入 (await 去重 promise)
+    const st = await ensureDetailData(movieId);
 
     const btnInCard = (card) => !!card.querySelector('.avdb-emby-btn');
 
-    // 资源库磁力 section
+    // 资源库磁力 section (点击时实时取 articles, 不捕获注入时的快照)
     const libSec = sectionByTitle('资源库磁力');
     if (libSec) {
       const cards = cardsInSection(libSec);
       cards.forEach((card, i) => {
         if (btnInCard(card)) return;
-        const art = st.articles[i];
-        const magnet = art && art.magnet;
         makeDetailBtn(card, async () => {
+          const art = (await ensureDetailData(movieId)).articles[i];
+          const magnet = art && art.magnet;
           if (!art || !magnet) return null;
           return { source: 'article', magnet, tid: art.tid, title: art.title || art.number || '', url: art.detail_url };
         });
       });
     }
 
-    // 在线磁链 section (标准磁力区 + 评论区磁力/ed2k, 卡片文本匹配取磁力)
+    // 在线磁链 section (标准磁力区 + 评论区磁力/ed2k, 点击时实时匹配取磁力)
     const onlSec = sectionByTitle('在线磁链');
     if (onlSec) {
       const cards = cardsInSection(onlSec);
-      const candidates = onlineMagnetCandidates(st);
       cards.forEach((card, i) => {
         if (btnInCard(card)) return;
-        const cand = matchOnlineMagnetByCard(card, candidates, i);
         makeDetailBtn(card, async () => {
+          const st2 = await ensureDetailData(movieId);
+          const cand = matchOnlineMagnetByCard(card, onlineMagnetCandidates(st2), i);
           if (!cand) return null;
-          return { source: 'javdb', magnet: cand.href, tid: null, title: cand.name || st.number || '', url: null };
+          return { source: 'javdb', magnet: cand.href, tid: null, title: cand.name || st2.number || '', url: null };
         });
       });
     }
@@ -692,5 +701,5 @@
     injectButtons(document);
     injectDetailButtons();
   }, 1200);
-  console.log('[AVdb-Emby] userscript v0.3.2 loaded. IMPORT_API=' + IMPORT_API);
+  console.log('[AVdb-Emby] userscript v0.3.3 loaded. IMPORT_API=' + IMPORT_API);
 })();
