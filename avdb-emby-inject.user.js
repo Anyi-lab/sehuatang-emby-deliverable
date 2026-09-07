@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AVdb → Emby 一键入库 (色花堂点单版)
 // @namespace    sehuatang.emby.deliverable
-// @version      0.3.3
+// @version      0.3.4
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
 // @description  在 AVdb 文章卡片 + 在线资源(online-resources ranking/top/latest)卡片 + 磁力详情页(online-resources?movie=)上注入"→ Emby 入库"按钮。文章卡片直接取缓存 magnet; 在线资源卡片按番号反查本地库(优先)或拉取 JavDB 磁力; 磁力详情页对资源库磁力(色花堂)、在线磁链(javdb magnets)与评论区资源(javdb comment-resources, 含磁力/ED2K)逐条注入, 每条一键入库。再推给 import_api (localhost:5081) 全包入库; 入库时从下拉选落地分类(AV/FC2/丝袜/国产自拍/欧美/里番, 可选自定义)。
@@ -18,11 +18,9 @@
   'use strict';
 
   // ---------- 配置 ----------
-  const IMPORT_API = 'http://localhost:5081';   // import_api 地址 (浏览器侧可达)
-  const JAVDB_MOVIE_MAX_RANK_CACHE = 1000;     // 在线资源 movie 缓存上限
-
   // 入库分类选项 (与 import_api CATEGORY_MAP 保持一致, 决定 strm 落地/已刮削目录分流)
   // key -> 显示名; norm_category 会把非法/空回退到 av
+  const JAVDB_MOVIE_MAX_RANK_CACHE = 1000;     // 在线资源 movie 缓存上限
   const CATEGORY_OPTIONS = [
     { key: 'av',  name: 'AV (默认)' },
     { key: 'fc2', name: 'FC2' },
@@ -169,15 +167,26 @@
     return m ? decodeURIComponent(m[1]) : null;
   }
 
+  // import_api 地址: 默认本机 5081; 若用局域网 IP 访问 avdb (192.168.* / 10.*), 同 host 推断
+  function importApiBase() {
+    const host = location.hostname || 'localhost';
+    if (/^(\d{1,3}\.){3}\d{1,3}$/.test(host)) return 'http://' + host + ':5081';
+    return 'http://localhost:5081';
+  }
+
   // 卡片内找番号文本 (在线资源卡片没有本地 tid, 从 DOM 文本提取番号)
+  // 先试整串匹配 (纯番号 span), 失败再从卡片全文搜番号模式 (可能与其他文字同行)
   function numberFromCard(card) {
-    const re = /^\s*([a-z0-9]{1,12}-\d{2,8})\s*$/i;
+    const full = /^\s*([a-z0-9]{1,12}-\d{2,8})\s*$/i;
     const els = card.querySelectorAll('span, div, p, a');
     for (const el of els) {
       const t = (el.textContent || '').trim();
-      if (t && t.length <= 20 && re.test(t)) return t;
+      if (t && t.length <= 20 && full.test(t)) return t;
     }
-    return null;
+    // 兜底: 全文搜索 "番号-数字" 模式 (取第一个, 排除过短/过长)
+    const loose = /\b([a-z0-9]{1,12}-\d{2,8})\b/i;
+    const m = (card.textContent || '').match(loose);
+    return m ? m[1] : null;
   }
 
   // ---------- 异步拉取 magnet ----------
@@ -267,7 +276,7 @@
     const res = await new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: 'POST',
-        url: IMPORT_API + '/api/import',
+        url: importApiBase() + '/api/import',
         headers: { 'Content-Type': 'application/json' },
         data: JSON.stringify(body),
         timeout: 15000,
@@ -275,7 +284,7 @@
           try { resolve({ status: r.status, data: JSON.parse(r.responseText) }); }
           catch (e) { resolve({ status: r.status, data: { error: r.responseText.slice(0, 200) } }); }
         },
-        onerror: () => reject(new Error('网络错误: 无法连接 import_api (' + IMPORT_API + ')')),
+        onerror: () => reject(new Error('网络错误: 无法连接 import_api (' + importApiBase() + ')')),
         ontimeout: () => reject(new Error('请求超时 (15s)')),
       });
     });
@@ -286,18 +295,24 @@
 
   async function pollStatus(taskId) {
     const deadline = Date.now() + 3 * 60 * 60 * 1000;
+    let nullStreak = 0;   // 连续无响应计数: 接口不可用/网络断时快速判失败, 不无限卡按钮
     for (;;) {
       const res = await new Promise((resolve) => {
         GM_xmlhttpRequest({
           method: 'GET',
-          url: IMPORT_API + '/api/import/status?task_id=' + encodeURIComponent(taskId),
+          url: importApiBase() + '/api/import/status?task_id=' + encodeURIComponent(taskId),
           timeout: 10000,
           onload: (r) => { try { resolve(JSON.parse(r.responseText)); } catch (e) { resolve(null); } },
           onerror: () => resolve(null),
           ontimeout: () => resolve(null),
         });
       });
-      if (!res) { await new Promise(r => setTimeout(r, 3000)); continue; }
+      if (!res) {
+        if (++nullStreak >= 10) return { done: false, data: { msg: '状态查询无响应 (import_api 不可达)' } };
+        await new Promise(r => setTimeout(r, 3000));
+        continue;
+      }
+      nullStreak = 0;
       const d = res.data || res;
       const status = String(d.status || '');
       if (/^(done|success|ok|完成|成功)$/i.test(status)) return { done: true, data: d };
@@ -531,8 +546,8 @@
       const n = String(c.name || '').toLowerCase().replace(/\s+/g, '');
       if (n && n.length > 4 && text.replace(/\s+/g, '').includes(n)) return c;
     }
-    // 3) 按序 fallback
-    return candidates[fallbackIndex] || null;
+    // 3) 按序 fallback (环取, 防卡片数 > 候选数时越界取到 undefined)
+    return candidates.length ? candidates[fallbackIndex % candidates.length] : null;
   }
 
   // ---------- 详情页: 磁力卡片容器 ----------
@@ -644,6 +659,8 @@
       detailLoadPromise = loadDetailData(movieId);
     }
     const fresh = await detailLoadPromise;   // 并发触发者共用同一个 promise
+    // 页面已在等待期间切到别的 movie: 不覆盖当前状态, 重载请求的 movieId
+    if (detailState.movieId !== movieId) return ensureDetailData(movieId);
     Object.assign(detailState, fresh);
     return detailState;
   }
@@ -701,5 +718,5 @@
     injectButtons(document);
     injectDetailButtons();
   }, 1200);
-  console.log('[AVdb-Emby] userscript v0.3.3 loaded. IMPORT_API=' + IMPORT_API);
+  console.log('[AVdb-Emby] userscript v0.3.4 loaded. import_api=' + importApiBase());
 })();
