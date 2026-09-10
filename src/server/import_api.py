@@ -550,11 +550,18 @@ def _strm_done_units(local_dir):
 
 def _video_units(video_paths):
     """由视频路径列表(相对 savepath)计算涉及的一级单元集合:
-    'FC2PPV-xxx/xx.mp4' -> 'FC2PPV-xxx';  'xx.mp4'(直接落在根) -> 'xx.mp4'"""
+    'FC2PPV-xxx/xx.mp4' -> 'FC2PPV-xxx';  'xx.mp4'(直接落在根) -> 'xx.mp4'
+    2026-09-10 加固: 容忍传入 list_dir 原始条目 (rel, name, None, size, is_dir) 或 JSON 化后的
+    list 形态 —— 曾因重扫路径直接透传 tuple 导致单元名变成 "('BMW-345', False, ...)" 拼接进
+    115 路径 (thread_3102110/BWM-345 未生成 strm, 整单未入库事故)。"""
     units = set()
     for vp in video_paths:
-        parts = str(vp).replace('\\', '/').split('/')
-        units.add(parts[0])
+        if isinstance(vp, (tuple, list)):
+            vp = vp[0] if vp else ''
+        s = str(vp).replace('\\', '/').strip('/')
+        if not s:
+            continue
+        units.add(s.split('/')[0])
     return units
 
 def _smartstrm_new_units(savepath, video_paths, category=None):
@@ -927,24 +934,33 @@ _MDC_RETRY_PREFIX = '.mdc-retry-'
 def _trigger_mdc_retry(local_dir):
     """MDCng 监控器按 source_path 去重: 同名 strm 覆盖写不触发重新刮削 (2026-09-06 实测,
     08:59 失败任务同路径 16:59 覆盖写完全无反应)。复制一个含番号的唯一文件名 strm
-    强制触发监控器(模拟新增文件, 新路径必入队)。返回 redo 路径或 None"""
+    强制触发监控器(模拟新增文件, 新路径必入队)。返回 redo 路径或 None。
+    2026-09-10 修复: 递归查找 strm (此前只看 local_dir 顶层, 母带 strm 位于 thread_x/<unit>/
+    子目录时永远找不到 → 重触发静默失效, task=17f8b55aa915 MKMP-668 卡满 300s 即此因)。"""
     try:
         if not os.path.isdir(local_dir):
             return None
-        # 清理本目录旧 redo 残留 (多任务共用目录时由调用方负责, 影片目录粒度足够)
-        for f in os.listdir(local_dir):
-            if _MDC_RETRY_PREFIX in f:
-                try:
-                    os.remove(os.path.join(local_dir, f))
-                except Exception:
-                    pass
-        strms = sorted(f for f in os.listdir(local_dir) if f.lower().endswith('.strm'))
+        strms = []
+        for root, _dirs, files in os.walk(local_dir):
+            for f in files:
+                if not f.lower().endswith('.strm'):
+                    continue
+                fp = os.path.join(root, f)
+                # 清理本目录旧 redo 残留 (多任务共用目录时由调用方负责, 影片目录粒度足够)
+                if _MDC_RETRY_PREFIX in f:
+                    try:
+                        os.remove(fp)
+                    except Exception:
+                        pass
+                else:
+                    strms.append(fp)
         if not strms:
+            log.warning('[mdc-retry] %s 及其子目录下无 strm, 无法重触发', local_dir)
             return None
-        src = os.path.join(local_dir, strms[0])
-        stem, ext = os.path.splitext(strms[0])
+        src = sorted(strms)[0]
+        stem, ext = os.path.splitext(os.path.basename(src))
         redo_name = f'{stem}{_MDC_RETRY_PREFIX}{int(time.time())}{ext}'
-        redo_path = os.path.join(local_dir, redo_name)
+        redo_path = os.path.join(os.path.dirname(src), redo_name)
         with open(src, 'rb') as fsrc:
             data = fsrc.read()
         if not data:
@@ -1319,7 +1335,10 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
         if not videos:
             try:
                 items = p.list_dir(savepath, maxdepth=4, use_cache=False)
-                videos = [it for it in items if not it[4] and os.path.splitext(it[1])[1].lower() in MEDIA_EXTS]
+                # 2026-09-10 修复: 取 rel 相对路径 (it[0]) 而非整条 tuple ——
+                # 后者会被 _video_units 当成路径拼接, 生成 "thread_x/('BMW-345', ...)" 无效单元
+                videos = [it[0] for it in items
+                          if not it[4] and os.path.splitext(it[1])[1].lower() in MEDIA_EXTS]
             except Exception as e:
                 log.warning('[import] 重新扫描视频失败: %s', str(e)[:100])
         if videos:
