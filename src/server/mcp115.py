@@ -58,15 +58,30 @@ class MCP115:
 
     def _call(self, tool, args, retry=2):
         """MCP 调用 + session 失效自动重建 (115-Desktop 重启/会话过期后旧 session 返回 None,
-        重建全局会话重试一次, 避免整条入库任务失败)"""
-        with _LOCK:
+        重建全局会话重试一次, 避免整条入库任务失败)
+
+        2026-09-13: 加锁改为带超时。以前是 `with _LOCK`, 一旦某次 MCP 调用被 115-Desktop
+        的 SSE 长连接挂住 (requests 的 timeout 是"每次读"超时, 服务端持续发心跳就永不触发),
+        锁会一直被占, 其它线程全部无声排队 —— 与同一晚 5081 端口假死是同一类"静默阻塞"。
+        现在 300s 拿不到锁就放弃本次调用 (返回 None, 走上层兜底), 不再无限等。"""
+        if not _LOCK.acquire(timeout=300):
+            log.warning('[mcp115] %s 等待 MCP 锁超时(300s), 本次调用放弃', tool)
+            return None
+        try:
             r = self.c.call(tool, args, retry=retry)
+        finally:
+            _LOCK.release()
         if r is None:
             log.warning('[mcp115] %s 无响应, 重建 MCP 会话重试', tool)
             try:
                 self.c = _rebuild_client()
-                with _LOCK:
+                if not _LOCK.acquire(timeout=300):
+                    log.warning('[mcp115] %s 重建后等待 MCP 锁超时(300s), 本次调用放弃', tool)
+                    return None
+                try:
                     r = self.c.call(tool, args, retry=retry)
+                finally:
+                    _LOCK.release()
             except Exception as e:
                 log.warning('[mcp115] 重建 MCP 会话失败: %s', str(e)[:120])
         return r

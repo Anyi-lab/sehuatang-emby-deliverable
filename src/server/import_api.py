@@ -11,8 +11,8 @@ import_api.py — 云主机一键入库服务 (<SERVER_IP>:5081): 磁力/电驴�
 端口: 5081 (独立于 5080 旧版爬虫搜索)
 访问: http://<LAN_IP>:5081/
 """
-import json, os, sys, time, re, sqlite3, threading, queue, urllib.request, urllib.parse, ssl, uuid, logging, subprocess, shutil
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import json, os, sys, time, re, sqlite3, threading, queue, urllib.request, urllib.parse, ssl, uuid, logging, subprocess, shutil, socket
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from cd2grpc import MOUNT_PREFIX   # /115open, CD2 API 落地检测 (2026-08-19)
 from datetime import datetime
 
@@ -3289,7 +3289,36 @@ load();
 </body>
 </html>"""
 
+class ImportHTTPServer(ThreadingHTTPServer):
+    """2026-09-13: 单线程 HTTPServer → 多线程。
+
+    事故: HTTPServer(socketserver.TCPServer) 一次只处理一个连接。当 Windows 侧
+    (浏览器/工具经 WSL localhost 转发) 建立起一个只握手、不发请求的连接, 主线程被
+    钉在 handle_one_request 的 readline 上, 之后所有请求 (面板健康检查 /health、
+    油猴入库 /api/import) 只能排进 accept backlog (默认 5), backlog 一满 SYN 直接
+    被丢弃 → 外面看到的就是"端口 5081 不通" (ss 显示 Recv-Q 堆积, 面板 967 一直
+    SYN-SENT)。进程本身没死, worker 线程还在正常跑任务, 所以日志照常滚动,
+    只有 HTTP 入口假死 —— 这次就是这样, 冻了一整段后被对端关掉才自己恢复。
+    多线程 + daemon 线程 + 每连接 30s 超时后, 单个坏连接不再影响其他人。
+    """
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 64
+
 class Handler(BaseHTTPRequestHandler):
+    # 2026-09-13 "端口不通" 事故修复①: 单连接读超时。
+    # 旧代码未设 timeout, 只要有客户端建立了 TCP 但迟迟不发请求头 (Windows 经 WSL
+    # localhost 转发进来的浏览器预连接/被动探测最常见), 处理线程就会永远卡在
+    # readline 上。设 30s 后 socket 超时, 连接被丢弃, 不再钉住处理线程。
+    timeout = 30
+
+    def handle(self):
+        """2026-09-13 修复②: 客户端中断/半开连接只记一行, 不再打整段 socketserver 堆栈"""
+        try:
+            super().handle()
+        except (ConnectionError, socket.timeout, BrokenPipeError) as e:
+            log.debug('[http] 连接中断: %s', e)
+
     def log_message(self, fmt, *args):
         pass
 
@@ -4102,6 +4131,6 @@ if __name__ == '__main__':
     # 服务重启恢复: 重新入队未完成任务 (必须在线程 worker 可用后调用)
     _requeue_stale_tasks()
     port = 5081
-    srv = HTTPServer(('0.0.0.0', port), Handler)
+    srv = ImportHTTPServer(('0.0.0.0', port), Handler)
     log.info('Import API (本机完整刮削) running on 0.0.0.0:%s', port)
     srv.serve_forever()
