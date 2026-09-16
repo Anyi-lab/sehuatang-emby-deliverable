@@ -41,7 +41,8 @@ sehuatang-emby-deliverable/
 │   ├── 01-项目概述.md               # 项目背景、目标、成果、演进历程
 │   ├── 02-系统架构.md               # 架构图、组件清单、数据流、端口
 │   ├── 03-使用方法.md               # 油猴脚本安装/使用、API 说明、任务监控
-│   └── 04-部署指南.md               # 服务器端组件部署、配置项说明
+│   ├── 04-部署指南.md               # 服务器端组件部署、配置项说明
+│   └── media-server-adapter.md      # 媒体服务器通用适配方案（Emby/Jellyfin，含扩展指引）
 ├── src/
 │   ├── userscript/
 │   │   └── sehuatang_import.user.js # 油猴脚本（浏览器端，脱敏）
@@ -106,6 +107,8 @@ sehuatang-emby-deliverable/
 
 ## 六、媒体服务器接入（Emby / Jellyfin，可多台）
 
+> 完整方案（差异矩阵 / 探测机制 / 扩展第三家 / 失败降级 / 验证矩阵）见 **`docs/media-server-adapter.md`**。
+
 扫库触发已做成 **Emby / Jellyfin 通用**，且支持一次广播到多台服务器。差异全部在适配层消化，
 调用点看到的始终是同一个 `media_refresh()`。
 
@@ -143,6 +146,14 @@ MEDIA_SERVER_TOKEN=08ba...2b54
 ```bash
 python3 src/server/import_api.py --media-check        # 逐台打印 家族/前缀/扫库返回码/UserId/路由
 python3 tests/media_server_stub_test.py              # 离线回归：3 个 stub 服务器，25 项断言
+```
+
+回归测试覆盖的三种后端形态：
+
+```
+① Emby 形态       强制 /emby 前缀 + PlaybackInfo 强制 UserId
+② 老 Jellyfin     两种前缀都认
+③ 新版 Jellyfin   任何 /emby 一律 404（最苛刻场景）
 ```
 
 回退链：某台完全不可达时**不阻塞**入库 —— 广播里任一台返回 204 即算成功，全失败才记 warning。
