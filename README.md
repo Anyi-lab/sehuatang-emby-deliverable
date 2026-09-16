@@ -104,4 +104,48 @@ sehuatang-emby-deliverable/
 
 ---
 
+## 六、媒体服务器接入（Emby / Jellyfin，可多台）
+
+扫库触发已做成 **Emby / Jellyfin 通用**，且支持一次广播到多台服务器。差异全部在适配层消化，
+调用点看到的始终是同一个 `media_refresh()`。
+
+**原理**：对得上的不是 URL 前缀，而是**接口名**（`Library/Refresh`、`Items`、`Items/{id}/PlaybackInfo` 三边同名同义）。
+每台服务器第一次被访问时自动探测两件事，并记住结果：
+
+| 探测项 | 怎么探 | 记住什么 |
+|---|---|---|
+| 家族 | `System/Info/Public` 的 `ProductName`（Emby 4.10 无此字段 → 判 Emby） | `flavor` |
+| 前缀 | 先试 `/emby/System/Info/Public`，404/405 再试无前缀版 | `prefix` |
+| 扫库路由 | 上次成功的路由 → `/emby/Library/Refresh` → `/Library/Refresh` | `route` |
+
+于是所有路径只写接口名（`/Library/Refresh`、`/Items`、`/Users`），由 `_media_path()` 按该台的
+`prefix` 拼完整路径 —— 对接**已删除 `/emby` 旧前缀的新版 Jellyfin** 时不会漏改。
+另外 `PlaybackInfo` 对 Emby 带 `UserId`、Jellyfin 不带，也按家族自动决定。
+
+### 6.1 配置
+
+实际生效值写在 `/etc/default/sehuatang-import`（systemd `EnvironmentFile`，权限 600）：
+
+```ini
+# 单台（向后兼容旧变量名 EMBY_URL / EMBY_TOKEN）
+MEDIA_SERVER_URL=http://172.25.224.1:8096
+MEDIA_SERVER_TOKEN=08ba...2b54
+
+# 多台：url|token 用逗号分隔，扫库会广播到每一台
+# MEDIA_SERVERS=http://172.25.224.1:8096|emby_key,http://172.25.224.1:8097|jellyfin_key
+```
+
+改完 `systemctl restart sehuatang-import`。API 密钥建议在各自后台「高级 → API 密钥」生成
+（Emby 也可 `POST /Auth/Keys?App=sehuatang-import`）—— 注意**不要**用浏览器登录令牌，登录一次就会被轮换掉。
+
+### 6.2 自检与回归测试
+
+```bash
+python3 src/server/import_api.py --media-check        # 逐台打印 家族/前缀/扫库返回码/UserId/路由
+python3 tests/media_server_stub_test.py              # 离线回归：3 个 stub 服务器，25 项断言
+```
+
+回退链：某台完全不可达时**不阻塞**入库 —— 广播里任一台返回 204 即算成功，全失败才记 warning。
+
+---
 *本材料由 QwenPaw 整理，用于项目交流展示。*
