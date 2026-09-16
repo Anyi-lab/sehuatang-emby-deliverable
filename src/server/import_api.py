@@ -64,107 +64,198 @@ UID = '<115_UID>'
 SMARTSTRM_WEBHOOK = 'http://127.0.0.1:8024/webhook/<WEBHOOK_TOKEN>'   # 本地版不再使用 (strm 由 mcp115 直接生成)
 SMARTSTRM_TASK = 'emby'
 SMARTSTRM_TASK_TV = 'tv'   # 剧集任务 (storage_path=/sehuatang_tv -> 本地 /strm/tv)
-# ===== 媒体服务器适配 (2026-09-16): Emby / Jellyfin 通用 =====
-# 两边共用同一套 /emby/* 路由 (Emby 原生, Jellyfin 是 Emby 3.5.2 fork, 前缀原样保留),
-# 实测差异只有三处:
-#   ① 令牌不通用 —— 必须在各自后台「高级 → API 密钥」生成, 换服务器就得换 key
-#   ② PlaybackInfo 在部分 Emby 版本要求带 UserId, Jellyfin 不需要 (传了也无害)
-#   ③ 家族识别: /System/Info/Public 的 ProductName="Jellyfin Server" 即 Jellyfin;
-#      Emby 4.10 不返回该字段 (Web UI 页面文本也只含 "Emby")
-# 故 URL/TOKEN 支持环境变量覆盖(可热指任意一台) + 家族探测(带缓存) + 认证头一次写全;
-# 4 个调用点 (Library/Refresh ×2、Items、PlaybackInfo) 统一走下面的适配函数, 换服务器不改代码。
-MEDIA_SERVER_URL = (os.environ.get('MEDIA_SERVER_URL') or os.environ.get('EMBY_URL')
-                    or 'http://172.25.224.1:8096').rstrip('/')
-MEDIA_SERVER_TOKEN = (os.environ.get('MEDIA_SERVER_TOKEN') or os.environ.get('EMBY_TOKEN')
-                      or '28593987edcf421c9929543654e97105')
-EMBY_URL = MEDIA_SERVER_URL       # 旧引用兼容 (其它位置仍按 EMBY_URL 读)
+# ===== 媒体服务器适配 (2026-09-16): Emby / Jellyfin 通用 + 多台广播 =====
+# 为什么「一套代码能触发两种服务器」:
+#   Emby 的 REST 路由原生就是 /emby/<控制器>/<方法>, Jellyfin 是 Emby 3.5.2 的 fork,
+#   路由由控制器反射生成, 早期版本连 /emby 这个旧前缀一起保留 (新版可能已废弃该前缀,
+#   所以不赌它 —— 见下面的 404 回退)。两台真正对得上的其实是「接口名」:
+#   Library/Refresh、Items、Items/{id}/PlaybackInfo 三边同名同义。
+#   实测差异只有三处, 全部在适配层内消化, 调用点看到的仍是同一个 media_refresh():
+#     ① 令牌不通用 —— 各自后台「高级 → API 密钥」生成, 所以 key 是按服务器存的, 不是全局一个
+#     ② PlaybackInfo: 部分 Emby 版本强制要 UserId, Jellyfin 不要 (传了也不报错) -> 按家族决定
+#     ③ 家族识别: /System/Info/Public 的 ProductName="Jellyfin Server" 即 Jellyfin;
+#        Emby 4.10 干脆不返回该字段 -> 字段缺失判 Emby
+#   另外加一层路由兜底: 万一某台既不认 /emby 前缀(404/405)也不认家族探测结论,
+#   自动改打无前缀 /Library/Refresh, 并把「哪条路走通了」记住, 下次直接走。
+#
+# 多台同时触发 (用户 2026-09-16): MEDIA_SERVERS="url1|token1,url2|token2" 逗号/分号分隔;
+#   未配置时退回单机 MEDIA_SERVER_URL/EMBY_URL + MEDIA_SERVER_TOKEN/EMBY_TOKEN。
+#   扫库是广播 (逐台 POST, 任一台 204 即算成功), 其余读操作(Items/PlaybackInfo)走第一台。
+_MEDIA_DEFAULT_URL = 'http://172.25.224.1:8096'
+_MEDIA_DEFAULT_TOKEN = '28593987edcf421c9929543654e97105'
+
+
+def _parse_media_servers():
+    """解析 MEDIA_SERVERS -> [{'url','token','flavor','user_id','at','route','name'}, ...]"""
+    raw = (os.environ.get('MEDIA_SERVERS') or '').strip()
+    out = []
+    for part in re.split(r'[;,\n]+', raw):
+        part = part.strip()
+        if not part:
+            continue
+        url, tok = (part.split('|', 1) + [''])[:2] if '|' in part else (part, '')
+        url = url.strip().rstrip('/')
+        if not url:
+            continue
+        out.append({'url': url, 'token': tok.strip() or _MEDIA_DEFAULT_TOKEN,
+                    'flavor': '', 'user_id': '', 'at': 0.0, 'route': '', 'name': url})
+    if not out:
+        out.append({'url': (os.environ.get('MEDIA_SERVER_URL') or os.environ.get('EMBY_URL')
+                            or _MEDIA_DEFAULT_URL).rstrip('/'),
+                    'token': (os.environ.get('MEDIA_SERVER_TOKEN') or os.environ.get('EMBY_TOKEN')
+                              or _MEDIA_DEFAULT_TOKEN),
+                    'flavor': '', 'user_id': '', 'at': 0.0, 'route': '', 'name': 'primary'})
+    return out
+
+
+MEDIA_SERVERS = _parse_media_servers()
+MEDIA_PRIMARY = MEDIA_SERVERS[0]
+MEDIA_SERVER_URL = MEDIA_PRIMARY['url']       # 单机兼容/其它位置仍按这两个变量读
+MEDIA_SERVER_TOKEN = MEDIA_PRIMARY['token']
+EMBY_URL = MEDIA_SERVER_URL
 EMBY_TOKEN = MEDIA_SERVER_TOKEN
-MEDIA_CACHE = {'flavor': '', 'user_id': '', 'at': 0.0}
 MEDIA_FLAVOR_TTL = 600            # 家族探测缓存 10 分钟, 避免每个任务打一次 Info
 MEDIA_CLIENT = 'sehuatang-import'
+MEDIA_LAST_REFRESH = []           # [(name, code/ERR), ...] 最近一次广播结果 (自检页可读)
 
 
-def _media_headers():
+def _srv(srv=None):
+    return srv or MEDIA_PRIMARY
+
+
+def _media_headers(srv=None):
     """三种认证头一次写全: Emby 认 X-Emby-Token / X-Emby-Authorization, Jellyfin 三个都认
     (外加调用点统一携带的 api_key 查询参数, 两服务器都支持)。"""
+    tok = _srv(srv)['token']
     return {
         'Content-Type': 'application/json',
-        'X-Emby-Token': MEDIA_SERVER_TOKEN,
-        'X-MediaBrowser-Token': MEDIA_SERVER_TOKEN,
-        'X-Emby-Authorization': (f'MediaBrowser Token="{MEDIA_SERVER_TOKEN}", Client="{MEDIA_CLIENT}", '
+        'X-Emby-Token': tok,
+        'X-MediaBrowser-Token': tok,
+        'X-Emby-Authorization': (f'MediaBrowser Token="{tok}", Client="{MEDIA_CLIENT}", '
                                  f'Device="WSL", DeviceId="{MEDIA_CLIENT}", Version="1.0"'),
     }
 
 
-def _media_url(path, **params):
+def _media_url(path, srv=None, **params):
     """拼完整 URL, 自动带 api_key"""
-    q = {'api_key': MEDIA_SERVER_TOKEN}
+    s = _srv(srv)
+    q = {'api_key': s['token']}
     q.update({k: v for k, v in params.items() if v not in (None, '')})
-    return MEDIA_SERVER_URL + path + '?' + urllib.parse.urlencode(q)
+    return s['url'] + path + '?' + urllib.parse.urlencode(q)
 
 
-def _media_req(path, data=None, method='GET', **params):
-    return urllib.request.Request(_media_url(path, **params), data=data,
-                                  headers=_media_headers(), method=method)
+def _media_req(path, data=None, method='GET', srv=None, **params):
+    return urllib.request.Request(_media_url(path, srv=srv, **params), data=data,
+                                  headers=_media_headers(srv), method=method)
 
 
-def media_server_flavor(force=False):
-    """'jellyfin' / 'emby' / ''(探测失败)。带 TTL 缓存, 探测失败时沿用上次结果。"""
+def media_server_flavor(force=False, srv=None):
+    """'jellyfin' / 'emby' / ''(探测失败)。按服务器缓存, 探测失败沿用上次结果。"""
+    s = _srv(srv)
     now = time.time()
-    if not force and MEDIA_CACHE['flavor'] and now - MEDIA_CACHE['at'] < MEDIA_FLAVOR_TTL:
-        return MEDIA_CACHE['flavor']
+    if not force and s['flavor'] and now - s['at'] < MEDIA_FLAVOR_TTL:
+        return s['flavor']
     for path in ('/System/Info/Public', '/emby/System/Info/Public'):
         try:
-            with urllib.request.urlopen(urllib.request.Request(MEDIA_SERVER_URL + path),
+            with urllib.request.urlopen(urllib.request.Request(s['url'] + path),
                                         timeout=8, context=ctx) as r:
                 d = json.loads(r.read().decode('utf-8', 'replace'))
         except Exception as e:
-            log.debug('[media] 家族探测 %s 失败: %s', path, str(e)[:80])
+            log.debug('[media] 家族探测 %s%s 失败: %s', s['name'], path, str(e)[:80])
             continue
         prod = str(d.get('ProductName') or '').strip()
         low = (prod or json.dumps(d, ensure_ascii=False)).lower()
-        MEDIA_CACHE['flavor'] = 'jellyfin' if 'jellyfin' in low else 'emby'
-        MEDIA_CACHE['at'] = now
+        s['flavor'] = 'jellyfin' if 'jellyfin' in low else 'emby'
+        s['at'] = now
         break
-    return MEDIA_CACHE['flavor']
+    return s['flavor']
 
 
-def media_user_id():
+def media_user_id(srv=None):
     """取一个可用 UserId (Emby 的 PlaybackInfo 有时强制要求)。取不到返回 ''。"""
-    if MEDIA_CACHE['user_id']:
-        return MEDIA_CACHE['user_id']
+    s = _srv(srv)
+    if s['user_id']:
+        return s['user_id']
     try:
-        with urllib.request.urlopen(_media_req('/emby/Users'), timeout=10, context=ctx) as r:
+        with urllib.request.urlopen(_media_req('/emby/Users', srv=s), timeout=10, context=ctx) as r:
             users = json.loads(r.read().decode('utf-8', 'replace'))
         if isinstance(users, list) and users:
-            MEDIA_CACHE['user_id'] = users[0].get('Id') or ''
-            log.info('[media] 取到 UserId=%s (%s)', MEDIA_CACHE['user_id'][:8], users[0].get('Name'))
+            s['user_id'] = users[0].get('Id') or ''
+            log.info('[media] %s 取到 UserId=%s (%s)', s['name'], s['user_id'][:8], users[0].get('Name'))
     except Exception as e:
-        log.warning('[media] 取 UserId 失败: %s', str(e)[:100])
-    return MEDIA_CACHE['user_id']
+        log.warning('[media] %s 取 UserId 失败: %s', s['name'], str(e)[:100])
+    return s['user_id']
 
 
-def media_refresh(timeout=30):
-    """触发扫库: 两服务器都是 POST {url}/emby/Library/Refresh -> 204。
-    若某台不认 /emby 前缀(404/405)自动回退无前缀路由。"""
+def _media_refresh_one(s, timeout=30):
+    """单台扫库: 上次成功的路由优先, 否则 /emby/Library/Refresh -> (404/405) /Library/Refresh。"""
     last = None
-    for path in ('/emby/Library/Refresh', '/Library/Refresh'):
+    paths, seen = [], set()
+    for p in (s['route'], '/emby/Library/Refresh', '/Library/Refresh'):
+        if p and p not in seen:
+            seen.add(p)
+            paths.append(p)
+    for path in paths:
         try:
-            with urllib.request.urlopen(_media_req(path, data=b'', method='POST'),
+            with urllib.request.urlopen(_media_req(path, data=b'', method='POST', srv=s),
                                         timeout=timeout, context=ctx) as resp:
+                if s['route'] != path:
+                    log.info('[media] %s 扫库路由 = %s (HTTP %s)', s['name'], path, resp.status)
+                s['route'] = path
                 return resp.status
         except urllib.error.HTTPError as e:
             last = e
-            if e.code in (404, 405):
+            if e.code in (404, 405):     # 不认这条路由, 换下一条
                 continue
-            raise
-    raise last
+            return e.code                 # 401/500 等: 路由对, 是别的问题, 不再换路
+        except Exception as e:
+            last = e
+            return 'ERR:%s' % str(e)[:60]
+    raise last or RuntimeError('无可用扫库路由')
 
 
-def media_playback_url(item_id):
+def media_refresh(timeout=30):
+    """触发扫库 (广播到 MEDIA_SERVERS 里每一台)。任一台成功(204)即返回 204。
+    全失败时抛最后一个异常 —— 与改造前单台行为一致, 调用点不用改。"""
+    global MEDIA_LAST_REFRESH
+    codes, last = [], None
+    for s in MEDIA_SERVERS:
+        try:
+            codes.append((s['name'], _media_refresh_one(s, timeout=timeout)))
+        except Exception as e:
+            last = e
+            codes.append((s['name'], 'ERR:%s' % str(e)[:60]))
+    MEDIA_LAST_REFRESH = codes
+    if any(c == 204 for _, c in codes):
+        log.info('[media] 扫库广播 OK: %s', codes)
+        return 204
+    log.warning('[media] 扫库广播失败: %s', codes)
+    raise last or RuntimeError('扫库广播失败: %s' % (codes,))
+
+
+def media_playback_url(item_id, srv=None):
     """PlaybackInfo URL: Emby 带 UserId (部分版本强制), Jellyfin 不带。"""
-    uid = '' if media_server_flavor() == 'jellyfin' else media_user_id()
-    return _media_url(f'/emby/Items/{item_id}/PlaybackInfo', IsPlayback='true', UserId=uid)
+    uid = '' if media_server_flavor(srv=srv) == 'jellyfin' else media_user_id(srv=srv)
+    return _media_url(f'/emby/Items/{item_id}/PlaybackInfo', srv=srv, IsPlayback='true', UserId=uid)
+
+
+def media_server_status(probe=False):
+    """给自检/监控页用: 每台的家族、UserId、扫库返回码。probe=True 时才真的打网。"""
+    rows = []
+    for s in MEDIA_SERVERS:
+        row = {'name': s['name'], 'url': s['url'],
+               'token': s['token'][:4] + '...' + s['token'][-4:],
+               'flavor': media_server_flavor(force=probe, srv=s) or '?',
+               'user_id': s['user_id'] or '', 'route': s['route'] or '(未探测)'}
+        if probe:
+            try:
+                row['refresh'] = _media_refresh_one(s, timeout=15)
+            except urllib.error.HTTPError as e:
+                row['refresh'] = e.code
+            except Exception as e:
+                row['refresh'] = 'ERR:%s' % str(e)[:60]
+        rows.append(row)
+    return rows
 # 本地 strm 根目录 (MDCng watch: 容器 /media/待看/sehuatang <-> G:\srtm\待看\sehuatang)
 LOCAL_STRM_ROOT = '/mnt/g/srtm/待看/sehuatang'
 # MDCng 刮削输出目录 (watch 待看/sehuatang -> target /media/已刮削/AV)
@@ -4229,26 +4320,18 @@ def _requeue_stale_tasks():
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '--media-check':
-        # 冒烟自检: 换 key/换服务器后跑这个 (python3 import_api.py --media-check)
-        print('URL   :', MEDIA_SERVER_URL)
-        print('TOKEN :', MEDIA_SERVER_TOKEN[:4] + '...' + MEDIA_SERVER_TOKEN[-4:])
-        print('家族   :', media_server_flavor(force=True) or '(探测失败)')
-        print('UserId:', media_user_id() or '(取不到)')
-        try:
-            print('扫库   : HTTP', media_refresh(timeout=15))
-        except Exception as e:
-            body = ''
-            if hasattr(e, 'read'):
-                try:
-                    body = e.read()[:120].decode('utf-8', 'replace')
-                except Exception:
-                    pass
-            print('扫库   : 失败 %s %s' % (e, body))
+        # 冒烟自检: 换 key / 加服务器后跑这个 (python3 import_api.py --media-check)
+        print('配置来源 : %s' % ('MEDIA_SERVERS' if os.environ.get('MEDIA_SERVERS') else '单机 MEDIA_SERVER_URL/EMBY_URL'))
+        print('服务器数 : %d' % len(MEDIA_SERVERS))
+        for row in media_server_status(probe=True):
+            print('  - %-34s 家族=%-8s 扫库=%-6s UserId=%-10s 路由=%s'
+                  % (row['name'], row['flavor'], row['refresh'], row['user_id'][:8] or '-', row['route']))
+            print('      token=%s url=%s' % (row['token'], row['url']))
         try:
             items = _emby_items_by_path_prefix('/mnt/g/srtm/已刮削/AV')
-            print('条目   : /mnt/g/srtm/已刮削/AV 前缀命中 %d 条' % len(items))
+            print('条目     : /mnt/g/srtm/已刮削/AV 前缀命中 %d 条 (第一台)' % len(items))
         except Exception as e:
-            print('条目   : 失败 %s' % str(e)[:120])
+            print('条目     : 失败 %s' % str(e)[:120])
         sys.exit(0)
     init_log_db()
     # Emby 删除 → 115 删除同步 (2026-08-20)
