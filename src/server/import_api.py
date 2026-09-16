@@ -75,6 +75,9 @@ SMARTSTRM_TASK_TV = 'tv'   # 剧集任务 (storage_path=/sehuatang_tv -> 本地 
 #     ② PlaybackInfo: 部分 Emby 版本强制要 UserId, Jellyfin 不要 (传了也不报错) -> 按家族决定
 #     ③ 家族识别: /System/Info/Public 的 ProductName="Jellyfin Server" 即 Jellyfin;
 #        Emby 4.10 干脆不返回该字段 -> 字段缺失判 Emby
+#        顺带把「前缀」也学了: 先试 /emby/System/Info/Public, 404/405 就改用无前缀版 ——
+#        于是所有路径都只写接口名 (/Library/Refresh、/Items、/Users), 由 _media_path() 拼前缀,
+#        对接新版 Jellyfin(已删 /emby 旧前缀)时不会再有一处漏改
 #   另外加一层路由兜底: 万一某台既不认 /emby 前缀(404/405)也不认家族探测结论,
 #   自动改打无前缀 /Library/Refresh, 并把「哪条路走通了」记住, 下次直接走。
 #
@@ -121,13 +124,13 @@ def _parse_media_servers():
         if not url:
             continue
         out.append({'url': url, 'token': tok.strip() or _MEDIA_DEFAULT_TOKEN,
-                    'flavor': '', 'user_id': '', 'at': 0.0, 'route': '', 'name': url})
+                    'flavor': '', 'prefix': None, 'user_id': '', 'at': 0.0, 'route': '', 'name': url})
     if not out:
         out.append({'url': (os.environ.get('MEDIA_SERVER_URL') or os.environ.get('EMBY_URL')
                             or _MEDIA_DEFAULT_URL).rstrip('/'),
                     'token': (os.environ.get('MEDIA_SERVER_TOKEN') or os.environ.get('EMBY_TOKEN')
                               or _MEDIA_DEFAULT_TOKEN),
-                    'flavor': '', 'user_id': '', 'at': 0.0, 'route': '', 'name': 'primary'})
+                    'flavor': '', 'prefix': None, 'user_id': '', 'at': 0.0, 'route': '', 'name': 'primary'})
     return out
 
 
@@ -176,9 +179,11 @@ def media_server_flavor(force=False, srv=None):
     """'jellyfin' / 'emby' / ''(探测失败)。按服务器缓存, 探测失败沿用上次结果。"""
     s = _srv(srv)
     now = time.time()
-    if not force and s['flavor'] and now - s['at'] < MEDIA_FLAVOR_TTL:
+    if not force and s['flavor'] and s.get('prefix') is not None and now - s['at'] < MEDIA_FLAVOR_TTL:
         return s['flavor']
-    for path in ('/System/Info/Public', '/emby/System/Info/Public'):
+    # 前缀与家族一次探完: 先试带 /emby 前缀 (Emby 与老 Jellyfin 都认), 404/405 再试无前缀
+    # (新版 Jellyfin 可能已删掉 /emby 这个旧前缀) —— 探到哪个就把它记下来, 后续所有路径复用。
+    for path, pfx in (('/emby/System/Info/Public', '/emby'), ('/System/Info/Public', '')):
         try:
             with urllib.request.urlopen(urllib.request.Request(s['url'] + path),
                                         timeout=8, context=ctx) as r:
@@ -189,9 +194,29 @@ def media_server_flavor(force=False, srv=None):
         prod = str(d.get('ProductName') or '').strip()
         low = (prod or json.dumps(d, ensure_ascii=False)).lower()
         s['flavor'] = 'jellyfin' if 'jellyfin' in low else 'emby'
+        s['prefix'] = pfx
         s['at'] = now
         break
     return s['flavor']
+
+
+def _media_prefix(srv=None):
+    """这台服务器认的路径前缀: '/emby' 或 ''(无前缀)。未探测过就探一次。"""
+    s = _srv(srv)
+    if s.get('prefix') is None:
+        media_server_flavor(force=True, srv=s)
+    return s.get('prefix') or ''
+
+
+def _media_path(path, srv=None):
+    """把「接口名」按这台的实际情况拼成完整路径 —— 前缀由 _media_prefix() 决定,
+    所以调用点只写 /Library/Refresh、/Items 这种与服务器无关的名字。"""
+    pfx = _media_prefix(srv)
+    if pfx:
+        return path if path.startswith(pfx + '/') else pfx + path
+    if path.startswith('/emby/'):
+        return path[len('/emby'):]
+    return path
 
 
 def media_user_id(srv=None):
@@ -200,7 +225,8 @@ def media_user_id(srv=None):
     if s['user_id']:
         return s['user_id']
     try:
-        with urllib.request.urlopen(_media_req('/emby/Users', srv=s), timeout=10, context=ctx) as r:
+        with urllib.request.urlopen(_media_req(_media_path('/Users', srv=s), srv=s),
+                                    timeout=10, context=ctx) as r:
             users = json.loads(r.read().decode('utf-8', 'replace'))
         if isinstance(users, list) and users:
             s['user_id'] = users[0].get('Id') or ''
@@ -213,8 +239,10 @@ def media_user_id(srv=None):
 def _media_refresh_one(s, timeout=30):
     """单台扫库: 上次成功的路由优先, 否则 /emby/Library/Refresh -> (404/405) /Library/Refresh。"""
     last = None
+    pfx = _media_prefix(s)
     paths, seen = [], set()
-    for p in (s['route'], '/emby/Library/Refresh', '/Library/Refresh'):
+    for p in (s['route'], pfx + '/Library/Refresh' if pfx else '/Library/Refresh',
+              '/emby/Library/Refresh', '/Library/Refresh'):
         if p and p not in seen:
             seen.add(p)
             paths.append(p)
@@ -259,7 +287,8 @@ def media_refresh(timeout=30):
 def media_playback_url(item_id, srv=None):
     """PlaybackInfo URL: Emby 带 UserId (部分版本强制), Jellyfin 不带。"""
     uid = '' if media_server_flavor(srv=srv) == 'jellyfin' else media_user_id(srv=srv)
-    return _media_url(f'/emby/Items/{item_id}/PlaybackInfo', srv=srv, IsPlayback='true', UserId=uid)
+    return _media_url(_media_path(f'/Items/{item_id}/PlaybackInfo', srv=srv),
+                      srv=srv, IsPlayback='true', UserId=uid)
 
 
 def media_server_status(probe=False):
@@ -269,6 +298,7 @@ def media_server_status(probe=False):
         row = {'name': s['name'], 'url': s['url'],
                'token': s['token'][:4] + '...' + s['token'][-4:],
                'flavor': media_server_flavor(force=probe, srv=s) or '?',
+               'prefix': _media_prefix(s) or '(无)',
                'user_id': s['user_id'] or ''}
         if probe:
             try:
@@ -1350,7 +1380,8 @@ def _media_path_variants(prefix):
 def _emby_items_by_path_prefix(prefix, srv=None):
     """媒体服务器中 Path 以 prefix 开头的 Movie/Episode 条目 (全量查询 ~1.2MB, 本地过滤)。
     路径按 Windows/WSL 两种写法归一化后比较。"""
-    url = _media_url('/emby/Items', srv=srv, Recursive='true', IncludeItemTypes='Movie,Episode',
+    url = _media_url(_media_path('/Items', srv=srv), srv=srv,
+                     Recursive='true', IncludeItemTypes='Movie,Episode',
                      Fields='Path', Limit='5000')
     req = urllib.request.Request(url, headers=_media_headers(srv))
     with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
@@ -1374,7 +1405,7 @@ def _prewarm_probe_one(item_id, path):
     except urllib.error.HTTPError as e:
         # Emby 若反过来抱怨 UserId (部分版本要求 UserId 为空) -> 去掉参数重试一次
         if e.code == 400 and 'UserId=' in url:
-            url = _media_url(f'/emby/Items/{item_id}/PlaybackInfo', IsPlayback='true')
+            url = _media_url(_media_path(f'/Items/{item_id}/PlaybackInfo'), IsPlayback='true')
             req = urllib.request.Request(url, data=b'{}', headers=_media_headers(), method='POST')
             with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
                 d = json.loads(resp.read().decode('utf-8', 'replace'))
@@ -4371,8 +4402,9 @@ if __name__ == '__main__':
         print('配置来源 : %s' % ('MEDIA_SERVERS' if os.environ.get('MEDIA_SERVERS') else '单机 MEDIA_SERVER_URL/EMBY_URL'))
         print('服务器数 : %d' % len(MEDIA_SERVERS))
         for row in media_server_status(probe=True):
-            print('  - %-34s 家族=%-8s 扫库=%-6s UserId=%-10s 路由=%s'
-                  % (row['name'], row['flavor'], row['refresh'], row['user_id'][:8] or '-', row['route']))
+            print('  - %-34s 家族=%-8s 前缀=%-6s 扫库=%-6s UserId=%-10s 路由=%s'
+                  % (row['name'], row['flavor'], row['prefix'] or '(无)', row['refresh'],
+                     row['user_id'][:8] or '-', row['route']))
             print('      token=%s url=%s' % (row['token'], row['url']))
         try:
             items = _emby_items_by_path_prefix('/mnt/g/srtm/已刮削/AV')
