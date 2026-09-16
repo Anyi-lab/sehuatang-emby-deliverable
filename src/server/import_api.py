@@ -82,7 +82,30 @@ SMARTSTRM_TASK_TV = 'tv'   # 剧集任务 (storage_path=/sehuatang_tv -> 本地 
 #   未配置时退回单机 MEDIA_SERVER_URL/EMBY_URL + MEDIA_SERVER_TOKEN/EMBY_TOKEN。
 #   扫库是广播 (逐台 POST, 任一台 204 即算成功), 其余读操作(Items/PlaybackInfo)走第一台。
 _MEDIA_DEFAULT_URL = 'http://172.25.224.1:8096'
-_MEDIA_DEFAULT_TOKEN = '28593987edcf421c9929543654e97105'
+_MEDIA_DEFAULT_TOKEN = '08ba96f52aaa4b8cbb262ffdf1102b54'   # Emby 后台「高级→API 密钥」生成的专用 key
+_MEDIA_ENV_FILE = '/etc/default/sehuatang-import'           # 实际生效值写这里 (systemd EnvironmentFile)
+
+
+def _load_media_env_file(path=_MEDIA_ENV_FILE):
+    """读 systemd 用的环境文件, 让命令行 `--media-check` 和服务进程看到同一套配置。
+    只填 os.environ 里没有的键, 真实环境变量优先级更高。"""
+    try:
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#') or '=' not in line:
+                        continue
+                    k, _, v = line.partition('=')
+                    k, v = k.strip(), v.strip().strip('"').strip("'")
+                    if k in ('MEDIA_SERVERS', 'MEDIA_SERVER_URL', 'MEDIA_SERVER_TOKEN',
+                             'EMBY_URL', 'EMBY_TOKEN') and not os.environ.get(k):
+                        os.environ[k] = v
+    except Exception as e:
+        log.debug('[media] 读 %s 失败: %s', path, str(e)[:80])
+
+
+_load_media_env_file()
 
 
 def _parse_media_servers():
@@ -246,7 +269,7 @@ def media_server_status(probe=False):
         row = {'name': s['name'], 'url': s['url'],
                'token': s['token'][:4] + '...' + s['token'][-4:],
                'flavor': media_server_flavor(force=probe, srv=s) or '?',
-               'user_id': s['user_id'] or '', 'route': s['route'] or '(未探测)'}
+               'user_id': s['user_id'] or ''}
         if probe:
             try:
                 row['refresh'] = _media_refresh_one(s, timeout=15)
@@ -254,6 +277,7 @@ def media_server_status(probe=False):
                 row['refresh'] = e.code
             except Exception as e:
                 row['refresh'] = 'ERR:%s' % str(e)[:60]
+        row['route'] = s['route'] or '(未探测)'
         rows.append(row)
     return rows
 # 本地 strm 根目录 (MDCng watch: 容器 /media/待看/sehuatang <-> G:\srtm\待看\sehuatang)
@@ -1307,14 +1331,37 @@ PREWARM_POLL_TIMEOUT_S = 180  # 等 Emby 索引到新条目的最长等待(秒)
 PREWARM_PROBE_RETRY = 2       # 探测失败(空媒体信息)后的额外重试次数
 PREWARM_ITEM_LOCK = threading.Lock()   # 全局串行化探测, 防并发打爆 115
 
-def _emby_items_by_path_prefix(prefix):
-    """媒体服务器中 Path 以 prefix 开头的 Movie/Episode 条目 (全量查询 ~1.2MB, 本地过滤)"""
-    url = _media_url('/emby/Items', Recursive='true', IncludeItemTypes='Movie,Episode',
+def _media_path_variants(prefix):
+    """同一路径的多种写法: Emby 跑在 Windows 上, Path 返回 G:\\srtm\\..., 而我们传的是
+    /mnt/g/srtm/... —— 不归一化就一条都匹配不上。返回所有等价写法。"""
+    norm = (prefix or '').replace('\\', '/').rstrip('/')
+    out = {norm}
+    m = re.match(r'^/mnt/([a-zA-Z])/(.*)$', norm)
+    if m:
+        drive, rest = m.group(1).upper(), m.group(2)
+        out.add('%s:\\%s' % (drive, rest.replace('/', '\\')))
+        out.add('%s:/%s' % (drive, rest))
+    m2 = re.match(r'^([a-zA-Z]):[\\/](.*)$', norm)
+    if m2:
+        out.add('/mnt/%s/%s' % (m2.group(1).lower(), m2.group(2)))
+    return [v.rstrip('/') for v in out if v]
+
+
+def _emby_items_by_path_prefix(prefix, srv=None):
+    """媒体服务器中 Path 以 prefix 开头的 Movie/Episode 条目 (全量查询 ~1.2MB, 本地过滤)。
+    路径按 Windows/WSL 两种写法归一化后比较。"""
+    url = _media_url('/emby/Items', srv=srv, Recursive='true', IncludeItemTypes='Movie,Episode',
                      Fields='Path', Limit='5000')
-    req = urllib.request.Request(url, headers=_media_headers())
+    req = urllib.request.Request(url, headers=_media_headers(srv))
     with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
         d = json.loads(resp.read().decode('utf-8', 'replace'))
-    return [it for it in d.get('Items', []) if (it.get('Path') or '').startswith(prefix)]
+    variants = _media_path_variants(prefix)
+    hit = []
+    for it in d.get('Items', []):
+        p = (it.get('Path') or '').replace('\\', '/').rstrip('/')
+        if any(p == v or p.startswith(v + '/') for v in variants):
+            hit.append(it)
+    return hit
 
 def _prewarm_probe_one(item_id, path):
     """对单个条目 POST PlaybackInfo(IsPlayback=true), 触发媒体探测并写入缓存。
