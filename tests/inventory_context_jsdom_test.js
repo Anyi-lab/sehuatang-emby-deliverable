@@ -46,6 +46,14 @@ function boot(kind, resp) {
     });
     const w = dom.window;
     const seen = [];
+    const logs = [];                       // v1.14.1: 抓控制台, 断言诊断行
+    w.console = {
+        log: (...a) => logs.push(a.map(x => (typeof x === 'string' ? x : '') ).join(' ')
+                                      + ' ' + a.filter(x => typeof x !== 'string')
+                                               .map(x => JSON.stringify(x)).join(' ')),
+        warn: (...a) => logs.push('WARN ' + a.map(x => String(x)).join(' ')),
+        error: () => {}, info: () => {}, debug: () => {}
+    };
     w.GM_xmlhttpRequest = (o) => {
         if (String(o.url).indexOf('/api/import/lookup') >= 0) {
             seen.push(JSON.parse(o.data || '{}'));
@@ -59,7 +67,7 @@ function boot(kind, resp) {
     w.GM_setValue = () => {};
     w.GM_addStyle = () => {};
     w.eval(fs.readFileSync(SCRIPT, 'utf8'));
-    return { dom, w, seen };
+    return { dom, w, seen, logs };
 }
 
 let pass = 0, fail = 0;
@@ -95,6 +103,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         const row = w.document.querySelector('#sht-nav .sht-nav-item .sht-nav-inv');
         ok('徽章渲染成 ✅在库', !!row && /在库/.test(row.textContent), row && row.textContent);
         ok('徽章 title 说明来源是台账番号', !!row && /番号/.test(row.title || ''), row && row.title);
+        // v1.14.1 诊断: 靠页面文本判定时必须把送出去的文本打出来
+        ok('诊断行打出送出的页面文本', r.logs.some(l => /诊断/.test(l) && /SNOS-403/.test(l)),
+           r.logs.filter(l => /诊断/.test(l)));
     }
 
     // ---------- 2. 合集帖: 12 条同一段文本, single=false ----------
@@ -109,6 +120,8 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
            (b.contexts || []).every((c, i) => !c.some(s => s.indexOf(b.links[i]) >= 0)));
         ok('没有把页面标题塞进 contexts (多链接页)',
            (b.contexts || []).every(c => !c.some(s => /Powered by Discuz/.test(s))));
+        ok('服务端没回条目时不打诊断行 (不刷屏)', !r.logs.some(l => /诊断/.test(l)),
+           r.logs.filter(l => /诊断/.test(l)));
     }
 
     // ---------- 3. 12 条各带各的番号: 每条的最近文本层必须是自己那段 ----------
@@ -136,6 +149,8 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         const row = r.w.document.querySelector('#sht-nav .sht-nav-item .sht-nav-inv');
         ok('⚠️未校验 渲染正确', !!row && /未校验/.test(row.textContent), row && row.textContent);
         ok('unknown 提示里带原因', !!row && /番号/.test(row.title || ''), row && row.title);
+        ok('一条都没抠出来时也打诊断行 (便于核对 DOM)',
+           r.logs.some(l => /诊断/.test(l) && /SNOS-403/.test(l)), r.logs.filter(l => /诊断/.test(l)));
     }
 
     console.log('\n===== 前端桩测: ' + (fail ? ('失败 ' + fail + ' 项 / 共 ' + (pass + fail)) : ('全部通过 (' + pass + ')')) + ' =====');
