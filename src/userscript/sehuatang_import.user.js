@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         色花堂链接级一键入库(逐条磁力/ed2k) + 元数据补充
 // @namespace    sehuatang-import
-// @version      1.10.0
+// @version      1.11.0
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @source       https://github.com/Anyi-lab/sehuatang-emby-deliverable
-// @description  色花堂链接级一键入库(逐条磁力/ed2k)。每条链接手工选择类型: "番号"=影片(推→等→清小文件→strm→MDC刮削→Emby刷新→预热; MDC失败/不完整由油猴📤补充); "非番号"=剧集(推→等→重命名thread_xxx_S01E01..→SmartStrm生成strm→油猴📤补充元数据→Emby刷新+预热, 即使1个视频也是剧集)。右下角磁力导航面板列出全部链接可点击快速滚动定位。v1.6.3: 修复手机版磁力被 <wbr>/<br> 等空元素拆成多段文本节点导致的漏识别(全文本拼接兜底+iframe兜底); v1.7.0: 新增手动输入磁力/ed2k链接入库对话框(导航面板✏️按钮, 支持多条, 提交到当前thread); v1.8.0: 新增元数据补充——提取帖子标题/简介/图片, 由本机浏览器下载图片后上传服务器生成 Emby 海报与简介 (导航面板📤按钮); v1.8.1: 元数据图片抓取优化——只抓静态图片(jpg/png等, 排除gif/webp/svg/ico), 懒加载取真实地址(data-original/data-src), 像素尺寸过滤(太小的表情/图标/头像不抓, 超高清原图不抓); v1.8.2: 描述同步新流程(去MySQL, 剧集文件名 thread_xxx_S01E01, MDC失败/剧集均待油猴补充元数据); v1.8.3: API_BASE 改 http(未配https), 悬浮面板新增📋一键跳转任务监控页按钮; v1.8.4: 手机版图片识别兼容——Discuz 附件真实地址 file/zoomfile 属性、选择器抓不到时全量图片兜底、iframe 内正文跨框架收集、相对路径补全域名; v1.8.7: 简介提取终极兜底——按"含磁力/ed2k 链接的文本节点"定位正文容器(色花堂正文必含下载链接, 不受模板类名影响), 简介提取失败时面板显示具体原因。 v1.9.0: 图片改为用户手工选择(候选图网格点选, 支持动图gif/webp/avif, 最多9张), 已选支持📌海报/↑↓调序/✕移除, 上传保留原图格式(mime)不再强制jpg, 移动端触控优化。 v1.9.1: 候选图排除小尺寸表情/图标(像素<200或未加载时CSS尺寸<100x80), 恢复表情/笑脸区域跳过。 v1.9.2: 标题清洗——去掉发布者/来源前缀标记(自转/115ED2K等, 保留【Omar盘点】类系列名), 去掉体积/配额后缀【1.87G/25P+18V/1配额】, 去掉尾部分区与论坛后缀(- 综合讨论区 - 98堂[原色花堂])。 v1.9.5: 磁力导航面板每条磁力新增📋复制按钮(复制完整干净链接含&dn), 标签优先显示文件名; v1.9.6: 取消正文磁力链接旁"🎬入库"按钮(避免页面出现两个入库), 改为磁力导航面板每条磁力🚀一键入库(点🚀选类型: 番号/非番号); // ==UserScript==; v1.9.10: 磁力规则参考 JAV-FORUM——支持 32位 base32 磁力hash(原仅40位hex), ed2k 要求文件名非空(空文件名ed2k拒绝)
+// @description  色花堂链接级一键入库(逐条磁力/ed2k)。每条链接手工选择类型: "番号"=影片(推→等→清小文件→strm→MDC刮削→Emby刷新→预热; MDC失败/不完整由油猴📤补充); "非番号"=剧集(推→等→重命名thread_xxx_S01E01..→SmartStrm生成strm→油猴📤补充元数据→Emby刷新+预热, 即使1个视频也是剧集)。右下角磁力导航面板列出全部链接可点击快速滚动定位。v1.6.3: 修复手机版磁力被 <wbr>/<br> 等空元素拆成多段文本节点导致的漏识别(全文本拼接兜底+iframe兜底); v1.7.0: 新增手动输入磁力/ed2k链接入库对话框(导航面板✏️按钮, 支持多条, 提交到当前thread); v1.8.0: 新增元数据补充——提取帖子标题/简介/图片, 由本机浏览器下载图片后上传服务器生成 Emby 海报与简介 (导航面板📤按钮); v1.8.1: 元数据图片抓取优化——只抓静态图片(jpg/png等, 排除gif/webp/svg/ico), 懒加载取真实地址(data-original/data-src), 像素尺寸过滤(太小的表情/图标/头像不抓, 超高清原图不抓); v1.8.2: 描述同步新流程(去MySQL, 剧集文件名 thread_xxx_S01E01, MDC失败/剧集均待油猴补充元数据); v1.8.3: API_BASE 改 http(未配https), 悬浮面板新增📋一键跳转任务监控页按钮; v1.8.4: 手机版图片识别兼容——Discuz 附件真实地址 file/zoomfile 属性、选择器抓不到时全量图片兜底、iframe 内正文跨框架收集、相对路径补全域名; v1.8.7: 简介提取终极兜底——按"含磁力/ed2k 链接的文本节点"定位正文容器(色花堂正文必含下载链接, 不受模板类名影响), 简介提取失败时面板显示具体原因。 v1.9.0: 图片改为用户手工选择(候选图网格点选, 支持动图gif/webp/avif, 最多9张), 已选支持📌海报/↑↓调序/✕移除, 上传保留原图格式(mime)不再强制jpg, 移动端触控优化。 v1.9.1: 候选图排除小尺寸表情/图标(像素<200或未加载时CSS尺寸<100x80), 恢复表情/笑脸区域跳过。 v1.9.2: 标题清洗——去掉发布者/来源前缀标记(自转/115ED2K等, 保留【Omar盘点】类系列名), 去掉体积/配额后缀【1.87G/25P+18V/1配额】, 去掉尾部分区与论坛后缀(- 综合讨论区 - 98堂[原色花堂])。 v1.9.5: 磁力导航面板每条磁力新增📋复制按钮(复制完整干净链接含&dn), 标签优先显示文件名; v1.9.6: 取消正文磁力链接旁"🎬入库"按钮(避免页面出现两个入库), 改为磁力导航面板每条磁力🚀一键入库(点🚀选类型: 番号/非番号); // ==UserScript==; v1.9.10: 磁力规则参考 JAV-FORUM——支持 32位 base32 磁力hash(原仅40位hex), ed2k 要求文件名非空(空文件名ed2k拒绝); v1.11.0: 新增批量入库(导航面板⚡按钮)——一次提交本页全部(或勾选)磁力/ed2k: 按行类型分组调 /api/import/batch(每组超100条自动分批), 支持👁dry-run预览、提交后并发轮询进度、面板关闭后头部保留进度徽章, 不再逐条点🚀逐条等; 顺带修掉面板/弹层内的磁力文本被 collectLinks 误收进导航列表
 // @author       QwenPaw
 // @match        *://sehuatang.net/*
 // @match        *://sehuatang.org/*
@@ -13,6 +13,8 @@
 // @match        *://sehuatang.org/*
 // @match        *://www.sehuatang.org/*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @connect      127.0.0.1
 // @connect      localhost
 // @connect      sehuatang.net
@@ -28,6 +30,13 @@
     const API_BASE = 'http://127.0.0.1:5081'; // 本机 import-api (WSL localhost 转发, 未配 https)
     const POLL_MS = 6000;                          // 状态轮询间隔
     const MAX_LABEL = 44;                          // 导航/按钮标签截断长度
+    // 刮削分类下拉(v1.11.0 抽成常量): 单条弹层/手动输入/批量入库三处共用, 避免选项各写一份漂移
+    const CAT_OPTIONS = '<option value="av">AV(默认)</option>' +
+        '<option value="fc2">FC2</option>' +
+        '<option value="sw">丝袜</option>' +
+        '<option value="cn">国产自拍</option>' +
+        '<option value="ea">欧美</option>' +
+        '<option value="lf">里番</option>';
     // ==================
 
     function getThreadId() {
@@ -55,6 +64,15 @@
             return m ? 'ed2k://|file|' + m[1] + '|' + m[2] + '|' + m[3].toLowerCase() + '|' : null;
         }
         return null;
+    }
+
+    // ===== UI 容器判定 (v1.11.0) =====
+    // 面板/弹层里渲染的磁力文本(以及服务端回显的结果行)不能被 collectLinks 当成页面链接二次收集,
+    // 否则每开一次批量面板就会把自己喂进导航列表(面板里的 link 文本 → 新的一行 → DOM 变化 → 再扫描)。
+    // 原代码只排除 #sht-import-wrap(已废弃的旧容器), 这里统一成白名单式排除。
+    const UI_SELECTOR = '#sht-nav,#sht-mask,#sht-toast,#sht-import-wrap';
+    function inUi(el) {
+        try { return !!(el && el.closest && el.closest(UI_SELECTOR)); } catch (e) { return false; }
     }
 
     // ===== 收集链接与锚点 =====
@@ -120,16 +138,19 @@
         } catch (e) {}
 
         document.querySelectorAll('a[href]').forEach(a => {
+            if (inUi(a)) return;                       // 面板/弹层内的链接不算页面磁力 (v1.11.0)
             const n = normLink(a.getAttribute('href') || '');
             if (n) addItem(n, a, a.textContent || n);
         });
 
         document.querySelectorAll('input[type="text"], input[type="hidden"], textarea').forEach(el => {
+            if (inUi(el)) return;                      // 手动/批量弹层输入框里的磁力不算页面磁力 (v1.11.0)
             const n = normLink(el.value || '');
             if (n) addItem(n, el, n);
         });
 
         document.querySelectorAll('.blockcode li, code, pre').forEach(el => {
+            if (inUi(el)) return;                      // (v1.11.0) 同上, 面板内代码块不收集
             const n = normLink(el.textContent || '');
             if (n) addItem(n, el, el.textContent || n);
         });
@@ -138,7 +159,7 @@
             acceptNode(node) {
                 const t = node.nodeValue || '';
                 if (!t) return NodeFilter.FILTER_REJECT;
-                if (node.parentNode && node.parentNode.closest && node.parentNode.closest('#sht-import-wrap')) {
+                if (inUi(node.parentNode)) {
                     return NodeFilter.FILTER_REJECT;
                 }
                 return /magnet:\S+|ed2k:\/\/\|file\|/.test(t) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
@@ -180,6 +201,7 @@
                     let el = null;
                     try {
                         const tn = advanceTo(m.index);
+                        if (inUi(tn && tn.parentNode)) continue;   // 命中面板/弹层内的文本, 跳过 (v1.11.0)
                         if (tn && tn.parentNode && tn.parentNode.nodeType === 1 &&
                             !tn.parentNode.closest('script, style')) {
                             el = tn.parentNode;
@@ -382,7 +404,7 @@
                     const t = node.nodeValue || '';
                     if (!t) return NodeFilter.FILTER_REJECT;
                     const p = node.parentNode;
-                    if (p && p.closest && p.closest('#sht-import-wrap')) return NodeFilter.FILTER_REJECT;
+                    if (inUi(p)) return NodeFilter.FILTER_REJECT;   // 面板/弹层内的文本不清洗 (v1.11.0)
                     if (p && p.tagName === 'SCRIPT') return NodeFilter.FILTER_REJECT;
                     if (p && p.classList && p.classList.contains('sht-link-btn')) return NodeFilter.FILTER_REJECT;
                     // 命中: 磁力/ed2k 特征 | 🎬入库 按钮杂质
@@ -428,14 +450,7 @@
             '<button class="sht-pop-kind" data-kind="non_fanhao">非番号(剧集)</button>' +
             '<div class="sht-pop-cat">' +
             '  <label>刮削分类</label>' +
-            '  <select class="sht-pop-cat-select">' +
-            '    <option value="av">AV(默认)</option>' +
-            '    <option value="fc2">FC2</option>' +
-            '    <option value="sw">丝袜</option>' +
-            '    <option value="cn">国产自拍</option>' +
-            '    <option value="ea">欧美</option>' +
-            '    <option value="lf">里番</option>' +
-            '  </select>' +
+            '  <select class="sht-pop-cat-select">' + CAT_OPTIONS + '</select>' +
             '</div>' +
             '<div class="sht-pop-sub">' + it.label + '</div>';
         document.body.appendChild(pop);
@@ -477,6 +492,7 @@
 
     let manualMask = null;
     function openManualDialog() {
+        closeOverlays('manual');          // 关掉批量/元数据弹层, 避免两个面板叠在一起 (v1.11.0)
         if (manualMask) return;
         manualMask = document.createElement('div');
         manualMask.id = 'sht-mask';
@@ -491,14 +507,7 @@
             '    <button class="sht-modal-kind" data-kind="non_fanhao">非番号(剧集)</button>' +
             '  </div>' +
             '  <div><span class="sht-modal-kind-label">刮削分类：</span>' +
-            '    <select id="sht-modal-category">' +
-            '      <option value="av">AV(默认)</option>' +
-            '      <option value="fc2">FC2</option>' +
-            '      <option value="sw">丝袜</option>' +
-            '      <option value="cn">国产自拍</option>' +
-            '      <option value="ea">欧美</option>' +
-            '      <option value="lf">里番</option>' +
-            '    </select>' +
+            '    <select id="sht-modal-category">' + CAT_OPTIONS + '</select>' +
             '  </div>' +
             '  <div id="sht-modal-status"></div>' +
             '  <div class="sht-modal-actions">' +
@@ -568,6 +577,393 @@
         });
 
         setTimeout(() => input.focus(), 50);
+    }
+
+    // ===== 批量入库 (v1.11.0) =====
+    // 痛点: 一个帖子几十条磁力, 逐条点 🚀 要重复"选类型 → 等服务端 6 秒轮询 → 再点下一条"。
+    // 后端早有 POST /api/import/batch(一次提交整批, 逐条建任务), 前端一直没用上 —— 这里补上入口。
+    // 设计: kind 是整批共用的 → 前端按行类型分组, 每组超过 BATCH_MAX 再自动切片;
+    //      提交后并发轮询所有 task_id(不再逐条阻塞等待), 面板关掉后进度留在导航头部徽章上。
+    const BATCH_MAX = 100;         // 与后端 BATCH_MAX_ITEMS 默认值一致(超了后端直接报错, 前端先分批)
+    const BATCH_POLL_CONC = 6;     // 每轮同时查询的任务数上限(几十条一起查会打满浏览器连接)
+    let batchMask = null;          // 批量面板根节点
+    let batchRows = [];            // [{it, pick, kind, ov, res, rowEl}] ov=行内改过类型(不再跟随顶部默认)
+    let batchRender = null;        // 面板开着时由 openBatchPanel 注册的行重绘函数(页面变化后调用)
+    let batchTasks = [];           // 本次批量建的任务 [{task_id, norm, label, kind, status, msg}]
+    let batchPollTimer = null;
+    const taskByNorm = new Map();  // norm -> task (导航行末尾显示 🕒/✅/❌)
+
+    function taskStatusText(t) {
+        if (!t) return '';
+        if (t.status === 'done') return '✅ 已入库';
+        if (t.status === 'failed') return '❌ 失败';
+        return '🕒 ' + t.task_id;
+    }
+
+    // 关掉所有悬浮层(批量/手动输入/元数据/单条类型弹层), 同一时间只留一个, 避免叠一起时 z-index 混乱
+    // except: 'manual' | 'meta' 时保留对应弹层(用户重复点同一个按钮时不清掉自己)
+    function closeOverlays(except) {
+        if (pop) { pop.remove(); pop = null; }
+        if (manualMask && except !== 'manual') { manualMask.remove(); manualMask = null; }
+        if (metaMask && except !== 'meta') { metaMask.remove(); metaMask = null; }
+        if (batchMask && except !== 'batch') { batchMask.remove(); batchMask = null; batchRender = null; }
+    }
+
+    function batchDefaultKind() {
+        const el = batchMask && batchMask.querySelector('input[name="sht-batch-kind"]:checked');
+        return (el && el.value === 'non_fanhao') ? 'non_fanhao' : 'fanhao';
+    }
+    function batchDefaultCategory() {
+        const el = batchMask && batchMask.querySelector('#sht-batch-category');
+        return (el && el.value) || 'av';
+    }
+
+    // 纯函数(离线可测): 勾选行 → 按 kind 分组 → 每组按 BATCH_MAX 切片
+    function batchGroups(rows) {
+        const groups = [];
+        ['fanhao', 'non_fanhao'].forEach(kind => {
+            const picked = rows.filter(r => r.pick && r.kind === kind);
+            for (let i = 0; i < picked.length; i += BATCH_MAX) {
+                groups.push({ kind: kind, rows: picked.slice(i, i + BATCH_MAX) });
+            }
+        });
+        return groups;
+    }
+
+    // 页面 DOM 变化后, 把面板里的行重新对齐到新收集出来的 items(按 norm 保留勾选/类型/结果)
+    function remapBatchRows() {
+        const prev = new Map(batchRows.map(r => [r.it.norm, r]));
+        const submitted = new Set(batchTasks.map(t => t.norm));
+        const dflt = batchMask ? batchDefaultKind() : 'fanhao';
+        batchRows = items.map(it => {
+            const old = prev.get(it.norm);
+            if (old) { old.it = it; old.rowEl = null; return old; }
+            return { it: it, pick: !submitted.has(it.norm), kind: dflt, ov: false,
+                     res: taskStatusText(taskByNorm.get(it.norm)), rowEl: null };
+        });
+    }
+
+    function navBadgeEl() { return nav && nav.querySelector('#sht-nav-badge'); }
+
+    function refreshBatchBadge(finished) {
+        const st = batchTasks;
+        const badge = navBadgeEl();
+        if (!st.length) { if (badge) badge.textContent = ''; return; }
+        const done = st.filter(t => t.status === 'done').length;
+        const fail = st.filter(t => t.status === 'failed').length;
+        if (badge) {
+            badge.textContent = '⚡' + done + '/' + st.length + (fail ? ' ✗' + fail : '');
+            badge.title = '批量入库进度(点开查看): 完成 ' + done + ' / 失败 ' + fail + ' / 共 ' + st.length;
+        }
+        if (finished) {
+            toast('批量入库结束: ' + done + ' 条完成' + (fail ? ', ' + fail + ' 条失败' : '') +
+                  ' — 详情 ' + API_BASE + '/tasks', !!fail);
+        }
+    }
+
+    function pollOneTask(t) {
+        return api('GET', '/api/import/status?task_id=' + t.task_id).then(s => {
+            t.status = s.status || 'running';
+            t.msg = s.msg || '';
+            t.step = s.step || '';
+            taskByNorm.set(t.norm, t);
+        }).catch(() => {});   // 单条查询失败不打断整轮, 下一轮再查
+    }
+
+    function stopBatchPolling() {
+        if (batchPollTimer) { clearInterval(batchPollTimer); batchPollTimer = null; }
+    }
+
+    // 并发轮询: 只查还没结束的任务, 每轮最多 BATCH_POLL_CONC 个并发
+    function startBatchPolling() {
+        if (!batchTasks.length || batchPollTimer) return;
+        const tick = async () => {
+            const pend = batchTasks.filter(t => t.status !== 'done' && t.status !== 'failed');
+            if (!pend.length) {
+                stopBatchPolling();
+                refreshBatchBadge(true);
+                if (nav) renderNavList(true);
+                return;
+            }
+            let idx = 0;
+            const workers = Array.from({ length: Math.min(BATCH_POLL_CONC, pend.length) }, async () => {
+                while (idx < pend.length) await pollOneTask(pend[idx++]);
+            });
+            await Promise.all(workers);
+            refreshBatchBadge(false);
+            if (nav) renderNavList(true);
+            if (batchMask && batchRender) batchRender();
+        };
+        batchPollTimer = setInterval(tick, POLL_MS);
+        tick();
+    }
+
+    function openBatchPanel() {
+        closeOverlays();
+        const submitted = new Set(batchTasks.map(t => t.norm));
+        batchRows = items.map(it => ({
+            it: it, pick: !submitted.has(it.norm), kind: 'fanhao', ov: false,
+            res: taskStatusText(taskByNorm.get(it.norm)), rowEl: null
+        }));
+        batchMask = document.createElement('div');
+        batchMask.id = 'sht-mask';
+        batchMask.innerHTML =
+            '<div id="sht-batch-modal">' +
+            '  <div id="sht-modal-title">⚡ 批量入库<span id="sht-batch-tid"></span><button id="sht-batch-close" title="关闭">✕</button></div>' +
+            '  <div id="sht-modal-sub">一次提交本页全部(或勾选)的磁力/ed2k。<strong>默认类型整批共用</strong>, 想单独走另一种就在行内点「番/剧」; 提交后服务端逐条建任务并按队列执行, <strong>可以关掉本面板继续浏览</strong>。</div>' +
+            '  <div id="sht-batch-bar">' +
+            '    <span class="sht-batch-lbl">默认类型</span>' +
+            '    <button class="sht-batch-kind active" data-kind="fanhao">番号(电影)</button>' +
+            '    <button class="sht-batch-kind" data-kind="non_fanhao">非番号(剧集)</button>' +
+            '    <span class="sht-batch-lbl">分类</span>' +
+            '    <select id="sht-batch-category">' + CAT_OPTIONS + '</select>' +
+            '  </div>' +
+            '  <div id="sht-batch-tools">' +
+            '    <span id="sht-batch-count"></span>' +
+            '    <button class="sht-batch-mini" data-act="all">全选</button>' +
+            '    <button class="sht-batch-mini" data-act="none">全不选</button>' +
+            '    <button class="sht-batch-mini" data-act="invert">反选</button>' +
+            '    <button class="sht-batch-mini" data-act="unsubmitted">仅未提交</button>' +
+            '  </div>' +
+            '  <div id="sht-batch-list"></div>' +
+            '  <div id="sht-batch-status"></div>' +
+            '  <div class="sht-modal-actions">' +
+            '    <button id="sht-batch-cancel">关闭</button>' +
+            '    <button id="sht-batch-preview">👁 预览</button>' +
+            '    <button id="sht-batch-ok">🚀 批量入库</button>' +
+            '  </div>' +
+            '</div>';
+        document.body.appendChild(batchMask);
+
+        const tidEl = batchMask.querySelector('#sht-batch-tid');
+        tidEl.textContent = 'thread: ' + (getThreadId() || '?') + ' / 共 ' + items.length + ' 条';
+        const listBox = batchMask.querySelector('#sht-batch-list');
+        const countEl = batchMask.querySelector('#sht-batch-count');
+        const statusEl = batchMask.querySelector('#sht-batch-status');
+        const okBtn = batchMask.querySelector('#sht-batch-ok');
+        const previewBtn = batchMask.querySelector('#sht-batch-preview');
+
+        const updateCount = () => {
+            const picked = batchRows.filter(r => r.pick);
+            const f = picked.filter(r => r.kind === 'fanhao').length;
+            countEl.textContent = '共 ' + batchRows.length + ' 条, 已选 ' + picked.length +
+                (picked.length ? '(番号 ' + f + ' / 剧集 ' + (picked.length - f) + ')' : '');
+        };
+
+        const renderRows = () => {
+            listBox.innerHTML = '';
+            if (!batchRows.length) {
+                listBox.innerHTML = '<div class="sht-batch-empty">⚠️ 本页没识别到磁力/ed2k 链接</div>';
+                return;
+            }
+            batchRows.forEach((r, idx) => {
+                const row = document.createElement('div');
+                row.className = 'sht-batch-row' + (r.pick ? '' : ' off') +
+                    (r.res && r.res.indexOf('✅') === 0 ? ' done' : '') +
+                    (r.res && r.res.indexOf('❌') === 0 ? ' fail' : '');
+                row.innerHTML =
+                    '<input type="checkbox" class="sht-batch-ck">' +
+                    '<span class="sht-batch-idx">' + (idx + 1) + '</span>' +
+                    '<span class="sht-batch-label" title="点击滚动定位到正文链接"></span>' +
+                    '<button class="sht-batch-kbtn" data-kind="fanhao" title="本行按番号(电影)入库">番</button>' +
+                    '<button class="sht-batch-kbtn" data-kind="non_fanhao" title="本行按非番号(剧集)入库">剧</button>' +
+                    '<span class="sht-batch-res"></span>';
+                const ck = row.querySelector('.sht-batch-ck');
+                ck.checked = r.pick;
+                const labelEl = row.querySelector('.sht-batch-label');
+                labelEl.textContent = r.it.label;
+                labelEl.addEventListener('click', () => flashTo(r.it.el));
+                // 完整链接只放进 title 属性(不是文本节点), 这样 collectLinks 的文本扫描/清洗都不会碰它
+                row.title = r.it.raw || r.it.norm;
+                ck.addEventListener('change', () => {
+                    r.pick = ck.checked;
+                    if (!r.pick) r.ov = true;   // 手动取消勾选后不再跟随顶部默认类型(避免语义被覆盖)
+                    row.classList.toggle('off', !r.pick);
+                    updateCount();
+                });
+                const paintKind = () => {
+                    row.querySelectorAll('.sht-batch-kbtn').forEach(b => {
+                        b.classList.toggle('active', b.dataset.kind === r.kind);
+                    });
+                };
+                row.querySelectorAll('.sht-batch-kbtn').forEach(b => {
+                    b.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        r.kind = b.dataset.kind;
+                        r.ov = true;
+                        r.pick = true;
+                        ck.checked = true;
+                        row.classList.remove('off');
+                        paintKind();
+                        updateCount();
+                    });
+                });
+                const resEl = row.querySelector('.sht-batch-res');
+                resEl.textContent = r.res || '';
+                resEl.className = 'sht-batch-res' + (r.res && r.res.indexOf('✅') === 0 ? ' ok'
+                    : (r.res && r.res.indexOf('❌') === 0 ? ' bad' : ''));
+                paintKind();
+                r.rowEl = row;
+                r.ck = ck;
+                listBox.appendChild(row);
+            });
+        };
+
+        // 服务端已建的这批任务, 把每行状态刷成 🕒/✅/❌
+        const syncRows = () => {
+            batchRows.forEach(r => {
+                const t = taskByNorm.get(r.it.norm);
+                if (!t || !r.rowEl) return;
+                const resEl = r.rowEl.querySelector('.sht-batch-res');
+                if (!resEl) return;
+                resEl.textContent = taskStatusText(t);
+                resEl.className = 'sht-batch-res' + (t.status === 'done' ? ' ok' : (t.status === 'failed' ? ' bad' : ''));
+                if (t.status === 'done') r.ck.checked = false;
+            });
+        };
+
+        const renderProgress = () => {
+            if (!batchTasks.length) return;
+            const done = batchTasks.filter(t => t.status === 'done').length;
+            const fail = batchTasks.filter(t => t.status === 'failed').length;
+            const run = batchTasks.length - done - fail;
+            statusEl.className = fail ? 'sht-batch-status bad' : (run ? '' : 'sht-batch-status ok');
+            statusEl.textContent = '⚡ 本次批量共 ' + batchTasks.length + ' 条: 完成 ' + done +
+                ', 失败 ' + fail + ', 进行 ' + run +
+                (run ? '(服务端按队列串行处理, 可关掉面板继续浏览)' : ' —— 已全部结束');
+        };
+
+        batchRender = () => { renderRows(); updateCount(); syncRows(); renderProgress(); };
+
+        renderRows();
+        updateCount();
+        renderProgress();
+
+        // 顶部默认类型/分类
+        batchMask.querySelectorAll('.sht-batch-kind').forEach(k => {
+            k.addEventListener('click', () => {
+                batchMask.querySelectorAll('.sht-batch-kind').forEach(x => x.classList.remove('active'));
+                k.classList.add('active');
+                const kind = k.dataset.kind;
+                // 只覆盖没有行内改过类型的行
+                batchRows.forEach(r => { if (!r.ov) r.kind = kind; });
+                renderRows();
+                updateCount();
+            });
+        });
+        // 恢复上次选的分类(没有则默认 av)
+        try {
+            const lastCat = GM_getValue('shtBatchCategory', 'av');
+            if (lastCat) batchMask.querySelector('#sht-batch-category').value = lastCat;
+        } catch (e) {}
+        batchMask.querySelector('#sht-batch-category').addEventListener('change', (e) => {
+            try { GM_setValue('shtBatchCategory', e.target.value); } catch (err) {}
+        });
+
+        // 快捷选择
+        batchMask.querySelectorAll('.sht-batch-mini').forEach(b => {
+            b.addEventListener('click', () => {
+                const act = b.dataset.act;
+                const submitted = new Set(batchTasks.map(t => t.norm));
+                if (act === 'all') batchRows.forEach(r => { r.pick = true; });
+                else if (act === 'none') batchRows.forEach(r => { r.pick = false; });
+                else if (act === 'invert') batchRows.forEach(r => { r.pick = !r.pick; });
+                else if (act === 'unsubmitted') batchRows.forEach(r => { r.pick = !submitted.has(r.it.norm); });
+                renderRows();
+                updateCount();
+            });
+        });
+
+        const close = () => { if (batchMask) { batchMask.remove(); batchMask = null; batchRender = null; } };
+        batchMask.querySelector('#sht-batch-close').addEventListener('click', close);
+        batchMask.querySelector('#sht-batch-cancel').addEventListener('click', close);
+        batchMask.addEventListener('click', (e) => { if (e.target === batchMask) close(); });
+
+        // 预览(dry_run) / 提交
+        const doSubmit = async (dryRun) => {
+            const groups = batchGroups(batchRows);
+            const total = groups.reduce((s, g) => s + g.rows.length, 0);
+            if (!total) {
+                statusEl.className = 'sht-batch-status bad';
+                statusEl.textContent = '⚠️ 没有勾选任何链接';
+                return;
+            }
+            okBtn.disabled = previewBtn.disabled = true;
+            statusEl.className = '';
+            statusEl.textContent = '⏳ ' + (dryRun ? '预览中' : '提交中') + ': ' + total + ' 条 / ' + groups.length + ' 批' +
+                (total > BATCH_MAX ? '(超过单批 ' + BATCH_MAX + ' 条, 已自动分批提交)' : '') + '…';
+            let okCount = 0, badCount = 0, skipCount = 0;
+            const errs = [];
+            for (const g of groups) {
+                try {
+                    const r = await api('POST', '/api/import/batch', {
+                        links: g.rows.map(x => x.it.norm),
+                        kind: g.kind,
+                        category: batchDefaultCategory(),
+                        thread_id: getThreadId() || undefined,
+                        title: document.title,
+                        thread_url: location.href,
+                        dry_run: !!dryRun
+                    });
+                    if (r.error) throw new Error(r.error);
+                    // 结果对号入座: 优先按 norm 匹配, 兜底按行号(服务端 items[].line 是提交顺序)
+                    const byNorm = new Map();
+                    (r.items || []).forEach(x => {
+                        const n = normLink(x.magnet);
+                        if (n) byNorm.set(n, x);
+                    });
+                    const byLine = new Map();
+                    (r.items || []).forEach(x => byLine.set(x.line, x));
+                    (r.errors || []).forEach(e => {
+                        errs.push('第 ' + (e.line || '?') + ' 条: ' + (e.error || '无效'));
+                    });
+                    skipCount += r.skipped || 0;
+                    g.rows.forEach((rr, i) => {
+                        const x = byNorm.get(rr.it.norm) || byLine.get(i + 1) || {};
+                        if (dryRun) {
+                            if (x.ok === false || x.error) { rr.res = '❌ ' + (x.error || '不支持'); badCount++; }
+                            else { rr.res = '👁 可提交'; okCount++; }
+                        } else if (x.ok && x.task_id) {
+                            rr.res = '✅ ' + x.task_id;
+                            rr.pick = false;
+                            okCount++;
+                            const t = { task_id: x.task_id, norm: rr.it.norm, label: rr.it.label,
+                                        kind: g.kind, status: 'queued', msg: '', step: '' };
+                            batchTasks.push(t);
+                            taskByNorm.set(rr.it.norm, t);
+                        } else {
+                            rr.res = '❌ ' + (x.error || '未建任务');
+                            badCount++;
+                        }
+                    });
+                } catch (e) {
+                    g.rows.forEach(rr => { rr.res = '❌ ' + e.message; badCount++; });
+                    errs.push(e.message);
+                }
+            }
+            okBtn.disabled = previewBtn.disabled = false;
+            renderRows();
+            updateCount();
+            if (dryRun) {
+                statusEl.className = errs.length ? 'sht-batch-status bad' : 'sht-batch-status ok';
+                statusEl.textContent = '👁 预览: ' + okCount + ' 条将被提交' +
+                    (badCount ? ', ' + badCount + ' 条无效' : '') +
+                    (skipCount ? ', ' + skipCount + ' 条被服务端跳过(重复等)' : '') +
+                    (errs.length ? ' —— ' + errs.slice(0, 3).join(' / ') : '');
+                return;
+            }
+            syncRows();
+            startBatchPolling();
+            refreshBatchBadge(false);
+            if (nav) renderNavList(true);
+            renderProgress();
+            if (errs.length) {
+                statusEl.textContent = '🚀 已提交 ' + okCount + ' 条' + (badCount ? ', ' + badCount + ' 条未建任务' : '') +
+                    ' —— 忽略的: ' + errs.slice(0, 2).join(' / ');
+            }
+        };
+        okBtn.addEventListener('click', () => { if (!okBtn.disabled) doSubmit(false); });
+        previewBtn.addEventListener('click', () => { if (!previewBtn.disabled) doSubmit(true); });
     }
 
     // ===== 元数据补充 (v1.8.0): 提取帖子信息 + 下载图片 + 上传服务器 =====
@@ -808,6 +1204,7 @@
 
     let metaMask = null;
     function openMetaPanel() {
+        closeOverlays('meta');            // 关掉批量/手动输入弹层, 避免两个面板叠在一起 (v1.11.0)
         if (metaMask) return;
         const meta = collectMeta();
         metaMask = document.createElement('div');
@@ -988,6 +1385,8 @@
             '<div id="sht-nav-head">' +
             '  <span id="sht-nav-title">📌 磁力导航</span>' +
             '  <span id="sht-nav-count"></span>' +
+            '  <button id="sht-nav-batch" title="批量入库: 一次提交本页全部(或勾选)磁力/ed2k">⚡</button>' +
+            '  <span id="sht-nav-badge" title="批量入库进度(点击查看)"></span>' +
             '  <button id="sht-nav-tasks" title="打开任务监控页">📋</button>' +
             '  <button id="sht-nav-meta" title="上传元数据(海报/简介)">📤</button>' +
             '  <button id="sht-nav-manual" title="手动输入磁力/ed2k 链接入库">✏️</button>' +
@@ -1002,6 +1401,16 @@
         nav.querySelector('#sht-nav-tasks').addEventListener('click', (e) => {
             e.stopPropagation();
             window.open(API_BASE + '/tasks', '_blank');
+        });
+
+        // ⚡ 批量入库 (v1.11.0): 一次提交本页全部/勾选磁力
+        nav.querySelector('#sht-nav-batch').addEventListener('click', (e) => {
+            e.stopPropagation();
+            openBatchPanel();
+        });
+        nav.querySelector('#sht-nav-badge').addEventListener('click', (e) => {
+            e.stopPropagation();
+            openBatchPanel();
         });
 
         nav.querySelector('#sht-nav-meta').addEventListener('click', (e) => {
@@ -1057,23 +1466,33 @@
         renderNavList();
     }
 
-    function renderNavList() {
+    function renderNavList(force) {
         const key = items.map(i => i.norm).join('|');
-        if (key === lastNavKey) return;
+        if (!force && key === lastNavKey) return;
         lastNavKey = key;
         navList.innerHTML = '';
         items.forEach((it, idx) => {
             const row = document.createElement('div');
             row.className = 'sht-nav-item';
-            row.innerHTML = '<span class="sht-nav-idx">' + (idx + 1) + '</span><span class="sht-nav-label"></span><span class="sht-nav-import" title="入库此链接 (可先选类型)">🚀</span><span class="sht-nav-copy" title="复制完整磁力链接">📋</span><span class="sht-nav-go">↘</span>';
+            row.innerHTML = '<span class="sht-nav-idx">' + (idx + 1) + '</span><span class="sht-nav-label"></span><span class="sht-nav-st"></span><span class="sht-nav-import" title="入库此链接 (可先选类型)">🚀</span><span class="sht-nav-copy" title="复制完整磁力链接">📋</span><span class="sht-nav-go">↘</span>';
             row.querySelector('.sht-nav-label').textContent = it.label;
             row.title = it.raw || it.norm;
+            // v1.11.0: 批量入库建过任务的行, 在末尾显示 🕒/✅/❌ (点 🚀 可看任务详情, 不再重复提交)
+            const t = taskByNorm.get(it.norm);
+            if (t) {
+                const st = row.querySelector('.sht-nav-st');
+                st.textContent = t.status === 'done' ? '✅' : (t.status === 'failed' ? '❌' : '🕒');
+                st.title = '批量任务 ' + t.task_id + (t.msg ? ': ' + t.msg : '');
+            }
             row.querySelector('.sht-nav-copy').addEventListener('click', (e) => {
                 e.stopPropagation();
                 copyMagnet(it.raw || it.norm);
             });
             row.querySelector('.sht-nav-import').addEventListener('click', (e) => {
                 e.stopPropagation();
+                const cur = taskByNorm.get(it.norm);
+                if (cur && cur.status === 'done') { toast('这条已入库: ' + cur.task_id, true); return; }
+                if (cur && cur.status !== 'failed') { toast('这条已在队列里: ' + cur.task_id + ' (' + stepLabel(cur) + ')', true); return; }
                 openKindPanel(it, row.querySelector('.sht-nav-import'), e);
             });
             row.addEventListener('click', () => {
@@ -1148,11 +1567,12 @@
 .sht-pop-cat-select{width:100%;padding:5px 6px;border:none;border-radius:6px;background:#1e293b;color:#e2e8f0;font-size:12px;cursor:pointer}
 .sht-pop-sub{color:#94a3b8;font-size:11px;margin-top:6px;word-break:break-all;max-height:60px;overflow:hidden}
 #sht-mask{position:fixed;inset:0;z-index:2147483649;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px}
-#sht-modal,#sht-meta-modal{width:min(560px,92vw);max-height:82vh;overflow:auto;background:#0f172a;border:1px solid #334155;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.6);padding:14px 16px;font-family:'Segoe UI',system-ui,sans-serif;display:flex;flex-direction:column;gap:10px}
+#sht-modal,#sht-meta-modal,#sht-batch-modal{width:min(560px,92vw);max-height:82vh;overflow:auto;background:#0f172a;border:1px solid #334155;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.6);padding:14px 16px;font-family:'Segoe UI',system-ui,sans-serif;display:flex;flex-direction:column;gap:10px}
+#sht-batch-modal{width:min(680px,94vw)}
 #sht-modal-title{display:flex;align-items:center;gap:8px;color:#f8fafc;font-size:14px;font-weight:700}
-#sht-meta-tid,#sht-modal-tid{margin-left:auto;color:#94a3b8;font-size:12px;font-weight:400}
-#sht-meta-close,#sht-modal-close{padding:1px 8px;border:none;border-radius:6px;background:#1e293b;color:#94a3b8;font-size:14px;cursor:pointer}
-#sht-meta-close:hover,#sht-modal-close:hover{background:#e63946;color:#fff}
+#sht-meta-tid,#sht-modal-tid,#sht-batch-tid{margin-left:auto;color:#94a3b8;font-size:12px;font-weight:400}
+#sht-meta-close,#sht-modal-close,#sht-batch-close{padding:1px 8px;border:none;border-radius:6px;background:#1e293b;color:#94a3b8;font-size:14px;cursor:pointer}
+#sht-meta-close:hover,#sht-modal-close:hover,#sht-batch-close:hover{background:#e63946;color:#fff}
 #sht-modal-sub{color:#94a3b8;font-size:12px;line-height:1.5}
 #sht-modal-input,#sht-meta-title-input,#sht-meta-desc-input{width:100%;box-sizing:border-box;background:#1e293b;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-size:13px;line-height:1.5;padding:8px 10px;resize:vertical;outline:none}
 #sht-modal-input{min-height:96px}
@@ -1187,20 +1607,57 @@
 #sht-meta-status{color:#e2e8f0;font-size:12px;min-height:18px;word-break:break-all}
 #sht-meta-status.sht-done{color:#2dc653;font-weight:600}
 .sht-modal-kind-label{color:#94a3b8;font-size:12px}
-.sht-modal-kind{padding:5px 12px;border:1px solid #334155;border-radius:8px;background:#1e293b;color:#e2e8f0;font-size:12px;cursor:pointer;margin-right:8px}
-.sht-modal-kind:hover{border-color:#e63946}
-.sht-modal-kind.active{background:#e63946;border-color:#e63946;color:#fff;font-weight:600}
-#sht-modal-category{padding:5px 10px;border:1px solid #334155;border-radius:8px;background:#1e293b;color:#e2e8f0;font-size:12px;cursor:pointer}
+.sht-modal-kind{display:inline-block;padding:5px 12px;border:1px solid #334155;border-radius:8px;background:#1e293b;color:#e2e8f0;font-size:12px;cursor:pointer;margin-right:8px}
+.sht-modal-kind:hover,.sht-batch-kind:hover{border-color:#e63946}
+.sht-modal-kind.active,.sht-batch-kind.active{background:#e63946;border-color:#e63946;color:#fff;font-weight:600}
+#sht-modal-category,#sht-batch-category{padding:5px 10px;border:1px solid #334155;border-radius:8px;background:#1e293b;color:#e2e8f0;font-size:12px;cursor:pointer}
 #sht-modal-status{color:#e2e8f0;font-size:12px;min-height:18px;word-break:break-all}
 #sht-modal-status.sht-done{color:#2dc653;font-weight:600}
 #sht-modal-status.sht-fail{color:#ef4444}
 .sht-modal-actions{display:flex;justify-content:flex-end;gap:8px}
-#sht-meta-cancel,#sht-meta-ok,#sht-modal-cancel,#sht-modal-ok{padding:7px 16px;border:none;border-radius:8px;font-size:13px;cursor:pointer}
-#sht-meta-cancel,#sht-modal-cancel{background:#1e293b;color:#94a3b8}
-#sht-meta-cancel:hover,#sht-modal-cancel:hover{background:#334155;color:#e2e8f0}
-#sht-meta-ok,#sht-modal-ok{background:linear-gradient(135deg,#e63946,#d90429);color:#fff;font-weight:600}
-#sht-meta-ok:hover,#sht-modal-ok:hover{filter:brightness(1.1)}
-#sht-meta-ok:disabled,#sht-modal-ok:disabled{cursor:wait;opacity:.75}
+#sht-meta-cancel,#sht-meta-ok,#sht-modal-cancel,#sht-modal-ok,#sht-batch-cancel,#sht-batch-preview,#sht-batch-ok{padding:7px 16px;border:none;border-radius:8px;font-size:13px;cursor:pointer}
+#sht-meta-cancel,#sht-modal-cancel,#sht-batch-cancel,#sht-batch-preview{background:#1e293b;color:#94a3b8}
+#sht-meta-cancel:hover,#sht-modal-cancel:hover,#sht-batch-cancel:hover,#sht-batch-preview:hover{background:#334155;color:#e2e8f0}
+#sht-meta-ok,#sht-modal-ok,#sht-batch-ok{background:linear-gradient(135deg,#e63946,#d90429);color:#fff;font-weight:600}
+#sht-meta-ok:hover,#sht-modal-ok:hover,#sht-batch-ok:hover{filter:brightness(1.1)}
+#sht-meta-ok:disabled,#sht-modal-ok:disabled,#sht-batch-ok:disabled,#sht-batch-preview:disabled{cursor:wait;opacity:.75}
+/* ===== 批量入库 (v1.11.0) ===== */
+#sht-nav-batch,#sht-nav-tasks{padding:2px 7px;border:none;border-radius:6px;background:rgba(255,255,255,.2);color:#fff;font-size:13px;cursor:pointer}
+#sht-nav-batch:hover,#sht-nav-tasks:hover{background:rgba(255,255,255,.35)}
+#sht-nav-badge{color:#fff;font-size:11px;font-weight:700;background:rgba(0,0,0,.28);border-radius:8px;padding:1px 6px;cursor:pointer;white-space:nowrap}
+#sht-nav-badge:empty{display:none}
+.sht-nav-st{flex:none;font-size:11px;min-width:0;cursor:help}
+#sht-batch-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;background:#0b1220;border:1px solid #1e293b;border-radius:10px}
+.sht-batch-lbl{color:#94a3b8;font-size:12px}
+.sht-batch-kind{display:inline-block;padding:5px 12px;border:1px solid #334155;border-radius:8px;background:#1e293b;color:#e2e8f0;font-size:12px;cursor:pointer}
+#sht-batch-tools{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#94a3b8;font-size:12px}
+#sht-batch-count{margin-right:auto}
+.sht-batch-mini{padding:3px 10px;border:1px solid #334155;border-radius:7px;background:#1e293b;color:#cbd5e1;font-size:12px;cursor:pointer}
+.sht-batch-mini:hover{border-color:#e63946;color:#fff}
+#sht-batch-list{max-height:46vh;overflow-y:auto;border:1px solid #1e293b;border-radius:10px;background:#0b1220;padding:4px}
+.sht-batch-row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;color:#e2e8f0;font-size:12px}
+.sht-batch-row:hover{background:#1e293b}
+.sht-batch-row.off{opacity:.45}
+.sht-batch-row.done .sht-batch-label{color:#2dc653}
+.sht-batch-row.fail .sht-batch-label{color:#f87171}
+.sht-batch-ck{flex:none;width:15px;height:15px;cursor:pointer;accent-color:#e63946}
+.sht-batch-idx{flex:none;min-width:22px;text-align:center;background:#334155;color:#e2e8f0;border-radius:4px;font-size:11px;font-weight:700;padding:1px 4px}
+.sht-batch-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.sht-batch-label:hover{color:#fff;text-decoration:underline}
+.sht-batch-kbtn{flex:none;width:24px;padding:1px 0;border:1px solid #334155;border-radius:5px;background:#1e293b;color:#94a3b8;font-size:11px;cursor:pointer}
+.sht-batch-kbtn:hover{border-color:#e63946;color:#fff}
+.sht-batch-kbtn.active{background:#e63946;border-color:#e63946;color:#fff;font-weight:700}
+.sht-batch-res{flex:none;min-width:74px;text-align:right;font-size:11px;color:#94a3b8;word-break:break-all}
+.sht-batch-res.ok{color:#2dc653;font-weight:600}
+.sht-batch-res.bad{color:#ef4444}
+.sht-batch-empty{color:#64748b;font-size:12px;padding:14px;text-align:center}
+#sht-batch-status{color:#e2e8f0;font-size:12px;min-height:18px;word-break:break-all}
+#sht-batch-status.ok{color:#2dc653;font-weight:600}
+#sht-batch-status.bad{color:#ef4444}
+@media (max-width:640px){
+  .sht-batch-res{min-width:0}
+  #sht-batch-list{max-height:38vh}
+}
 `;
         document.head.appendChild(s);
     }
@@ -1215,6 +1672,12 @@
         cleanPageMagnetTexts();
         collectLinks();
         attachButtons();
+        // v1.11.0: 批量面板开着时页面 DOM 一变(items 数组整体重建), 面板里的行要跟着重新对齐,
+        // 否则行还指向已失效的旧 item 对象(标签/滚动定位就不准了)
+        if (batchMask) {
+            remapBatchRows();
+            if (batchRender) batchRender();
+        }
         if (navList) renderNavList();
         else buildNav();
         const c = document.querySelector('#sht-nav-count');

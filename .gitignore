@@ -6,3 +6,4 @@ import_log.db
 .bak-*
 import_api.db
 *.bak-*
+*.bak*

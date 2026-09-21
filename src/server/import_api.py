@@ -14,6 +14,9 @@ import_api.py — 云主机一键入库服务 (<SERVER_IP>:5081): 磁力/电驴�
 import json, os, sys, time, re, sqlite3, threading, queue, urllib.request, urllib.error, urllib.parse, ssl, uuid, logging, subprocess, shutil, socket
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from cd2grpc import MOUNT_PREFIX   # /115open, CD2 API 落地检测 (2026-08-19)
+import avdb_source as avdb_src     # avdb 下载侧数据源(只读本地 sqlite, 2026-09-19)
+from avdb_page import AVDB_PAGE       # avdb 连接器独立面板 (GET /avdb, 2026-09-19)
+from index_page import render_index_page   # 首页 (批量入库页, 2026-09-20 抽出)
 from datetime import datetime
 
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -34,16 +37,30 @@ try:
     if 'thread_url' not in _cols:
         _cc.execute('ALTER TABLE import_log ADD COLUMN thread_url TEXT')
         _cc.commit()
+    # 2026-09-19: avdb adopt 任务记录 115 源目录 (服务重启后按原目录续跑)
+    if 'src_115' not in _cols:
+        _cc.execute('ALTER TABLE import_log ADD COLUMN src_115 TEXT')
+        _cc.commit()
+    # 2026-09-19: 任务来源 (''=色花堂网页/磁力, 'avdb'=avdb 下载联动) —— 任务监控页按来源区分
+    if 'origin' not in _cols:
+        _cc.execute("ALTER TABLE import_log ADD COLUMN origin TEXT DEFAULT ''")
+        # 一次性回填历史 adopt 任务: adopt 的 thread_id 是番号/目录名(非数字), 且带 src_115
+        _cc.execute("UPDATE import_log SET origin='avdb' WHERE COALESCE(origin,'')='' "
+                    "AND src_115 IS NOT NULL AND src_115<>'' "
+                    "AND (thread_id IS NULL OR thread_id NOT GLOB '[0-9]*')")
+        _cc.commit()
+        log.info('import_log 回填历史 avdb 来源任务: %d 条', _cc.total_changes)
     _cc.close()
 except Exception as _e:
     log.warning('import_log 迁移 thread_url 列失败: %s', str(_e)[:100])
 
 def _thread_url_of(thread_id, saved_url=''):
-    """帖子链接: 入库保存的真实 URL 优先, 否则按色花堂模板兜底 (thread-{tid}-1-1.html)"""
+    """帖子链接: 入库保存的真实 URL 优先, 否则按色花堂模板兜底 (thread-{tid}-1-1.html)
+    非数字 thread_id (avdb adopt 用番号目录名当 task 标识) 不生成假链接。"""
     tid = str(thread_id or '').strip()
     if saved_url and str(saved_url).startswith('http'):
         return str(saved_url)
-    if tid:
+    if tid.isdigit():
         return f'https://sehuatang.net/thread-{tid}-1-1.html'
     return ''
 
@@ -689,7 +706,7 @@ def init_log_db():
     c = sqlite3.connect(LOG_DB)
     c.execute('''CREATE TABLE IF NOT EXISTS import_log(
         task_id TEXT PRIMARY KEY, thread_id TEXT, magnet TEXT, title TEXT,
-        status TEXT, step TEXT, msg TEXT, kind TEXT, category TEXT,
+        status TEXT, step TEXT, msg TEXT, kind TEXT, category TEXT, origin TEXT,
         created_at TEXT DEFAULT (datetime('now','localtime')),
         updated_at TEXT DEFAULT (datetime('now','localtime')))''')
     c.execute('''CREATE TABLE IF NOT EXISTS import_log_history(
@@ -793,19 +810,31 @@ def _strm_done_units(local_dir):
 
 def _video_units(video_paths):
     """由视频路径列表(相对 savepath)计算涉及的一级单元集合:
-    'FC2PPV-xxx/xx.mp4' -> 'FC2PPV-xxx';  'xx.mp4'(直接落在根) -> 'xx.mp4'
+    'FC2PPV-xxx/xx.mp4' -> 'FC2PPV-xxx';  'xx.mp4'(直接落在根) -> ''(根单元)
     2026-09-10 加固: 容忍传入 list_dir 原始条目 (rel, name, None, size, is_dir) 或 JSON 化后的
     list 形态 —— 曾因重扫路径直接透传 tuple 导致单元名变成 "('BMW-345', False, ...)" 拼接进
-    115 路径 (thread_3102110/BWM-345 未生成 strm, 整单未入库事故)。"""
+    115 路径 (thread_3102110/BWM-345 未生成 strm, 整单未入库事故)。
+    2026-09-20 修: 根级文件(无 '/')归一成 '' —— 与 _strm_done_units 对根单元的表示一致。
+    旧写法对根文件返回文件名本身, 与 done 集合里的 '' 永远不相等, 于是每个根级视频
+    (正片 + 广告小视频 + 已被清理掉但仍留在 videos 里的广告) 都被当成独立单元去
+    gen_strm(文件路径) -> 恒返回 0 个, 每次入库白跑 N 次 115 往返 (N=根文件数)。"""
     units = set()
     for vp in video_paths:
         if isinstance(vp, (tuple, list)):
             vp = vp[0] if vp else ''
+        if vp is None:
+            continue
         s = str(vp).replace('\\', '/').strip('/')
         if not s:
             continue
-        units.add(s.split('/')[0])
+        seg = s.split('/')[0]
+        units.add('' if seg == s else seg)
     return units
+
+def _unit_path(savepath, unit):
+    """单元 -> 115 路径。根单元('') 就是 savepath 本身(不要再拼 '/')。"""
+    base = savepath.rstrip('/')
+    return base if unit == '' else base + '/' + unit
 
 def _smartstrm_new_units(savepath, video_paths, category=None):
     """计算需要触发 SmartStrm 的新单元列表(子目录路径或根视频文件路径)。
@@ -828,7 +857,7 @@ def _trigger_smartstrm_sync_units(savepath, units):
         return {'synced': []}
     results = []
     for u in units:
-        sub = f'{savepath.rstrip("/")}/{u}'
+        sub = _unit_path(savepath, u)
         r = _trigger_smartstrm_sync(sub)
         results.append({'unit': u, 'resp': r})
         time.sleep(1)
@@ -1129,6 +1158,13 @@ def _upload_local_meta_to_115(p, local_dir, savepath):
 # 移动到 已刮削/AV/<系列>/<番号>/, 轮询目标区找 含 strm+nfo+图片 且匹配番号的新目录。
 _FANHAO_RE = re.compile(r'(?<![A-Za-z0-9])([A-Za-z]{2,8}-?\d{2,6})(?![A-Za-z0-9])')
 
+def _fanhao_key(x):
+    """番号归一化 (2026-09-19): 本地文件名抠出的番号与 MDCng 目录名写法常不一致,
+    裸子串比对必然失配 → 白等 300s + 误报"刮削失败"。
+    例: VRKM01741 / VRKM-01741 → VRKM1741;  SAVR00721 / SAVR-721 → SAVR721。"""
+    x = re.sub(r'[^A-Z0-9]', '', (x or '').upper())
+    return re.sub(r'([A-Z])0+(\d)', r'\1\2', x)
+
 def _extract_fanhao_candidates(local_dir):
     """从本地 strm 文件名提取番号候选 (HUNTC-094 / MKBD-S127 / FC2PPV-123456)"""
     cands = set()
@@ -1166,7 +1202,7 @@ def _find_mdc_output(cands, recent_min=20, root=None):
             mt = os.path.getmtime(dp)
         except Exception:
             mt = 0
-        if cands and any(c in base for c in cands):
+        if cands and any(_fanhao_key(c) in _fanhao_key(base) for c in cands):
             return True, dp
         if not cands and now - mt < recent_min * 60:
             return True, dp
@@ -1174,10 +1210,37 @@ def _find_mdc_output(cands, recent_min=20, root=None):
 
 _MDC_RETRY_PREFIX = '.mdc-retry-'
 
+# 2026-09-20: 「待补元数据」判据 (done 但没走到 scan = MDC 没刮全, 等油猴补)
+# 附带的 NOT EXISTS: 同一帖 (thread_id) 若已有更新的成功任务 (done/scan), 旧记录不再计入
+# —— 面板行内「🔁 重刮」成功后清单自动收敛, 无需手工清理。
+PENDING_MD_SQL = """(status='done' AND step<>'scan' AND NOT EXISTS (
+    SELECT 1 FROM import_log n WHERE n.thread_id=import_log.thread_id AND n.status='done'
+      AND n.step='scan' AND n.created_at>import_log.created_at))"""
+
+def _retry_token(n=None):
+    """把整数编码成【纯字母】字符串 (base26)。重触发文件名的唯一性后缀必须不含数字。
+
+    2026-09-20 修复: 旧实现用 int(time.time()) 十进制后缀, MDCng 番号解析器里 91 系规则
+    `(?i)91[a-z]{0,}-?(\\d{3,})` 没有左边界约束, epoch '1789911528' 中段 '91'+'1528'
+    被当成番号 91-1528, 真番号 SNOS-403 被顶掉 → 重触发任务全部秒挂
+    (mdc_ng.db task 1128/1129/1130: stage=200 元数据校验失败,缺少'番号', 各 5.0s)。
+    同类污染还有 825 'RETRY-1789384841'。改纯字母后 MDC 仍能解析出原番号
+    (实测 task 1131: …SNOS-403.mdc-retry-fuqwlri.strm → 番号 SNOS-403, 22.22s 成功)。
+    用 time_ns() 而非秒级 epoch, 保证同秒内多次重触发也拿到不同文件名 (默认参数)。"""
+    if n is None:
+        n = time.time_ns()
+    s = ''
+    n = int(n)
+    while n > 0:
+        n, r = divmod(n, 26)
+        s = chr(97 + r) + s
+    return s or 'a'
+
 def _trigger_mdc_retry(local_dir):
     """MDCng 监控器按 source_path 去重: 同名 strm 覆盖写不触发重新刮削 (2026-09-06 实测,
-    08:59 失败任务同路径 16:59 覆盖写完全无反应)。复制一个含番号的唯一文件名 strm
-    强制触发监控器(模拟新增文件, 新路径必入队)。返回 redo 路径或 None。
+    08:59 失败任务同路径 16:59 覆盖写完全无反应; 删掉再重建同路径同样无反应)。复制一个含番号的
+    唯一文件名 strm 强制触发监控器(模拟新增文件, 新路径必入队)。返回 redo 路径或 None。
+    唯一性后缀必须是【纯字母】(_retry_token), 否则会被 MDCng 番号解析器读成番号 (2026-09-20 见上)。
     2026-09-10 修复: 递归查找 strm (此前只看 local_dir 顶层, 母带 strm 位于 thread_x/<unit>/
     子目录时永远找不到 → 重触发静默失效, task=17f8b55aa915 MKMP-668 卡满 300s 即此因)。"""
     try:
@@ -1202,7 +1265,7 @@ def _trigger_mdc_retry(local_dir):
             return None
         src = sorted(strms)[0]
         stem, ext = os.path.splitext(os.path.basename(src))
-        redo_name = f'{stem}{_MDC_RETRY_PREFIX}{int(time.time())}{ext}'
+        redo_name = f'{stem}{_MDC_RETRY_PREFIX}{_retry_token()}{ext}'
         redo_path = os.path.join(os.path.dirname(src), redo_name)
         with open(src, 'rb') as fsrc:
             data = fsrc.read()
@@ -1577,12 +1640,16 @@ def _run_import_dl(task_id, thread_id=None, magnet=None, title=None, thread_url=
                   thread_id=str(thread_id or ''), title=(title or '')[:300])
 
 def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_url=None, kind=None, category=None):
-    """处理阶段 (POST_QUEUE, 严格串行 1 worker): 剧集化/清理/文件名/strm/刮削/元数据/预热/Emby 扫库。
+    """处理阶段 (POST_QUEUE, 并发 POST_CONCURRENT=3; 2026-09-19 前为严格串行 1 worker):
+    剧集化/清理/文件名/strm/刮削/元数据/预热/Emby 扫库。
     离线下载阶段(DL_QUEUE)完成后自动转此队列; 服务重启恢复处理阶段任务时 DL_CTX 可能缺失,
     此时用 _find_thread_path 重新定位 115 目录并重新扫描视频。"""
     category = norm_category(category)
     ctx = DL_CTX.pop(task_id, {})
-    savepath = ctx.get('savepath') or _find_thread_path(str(thread_id or ''))
+    # adopt 任务(有 src_115): 落点就是 avdb 原目录 (2026-09-20 起不再迁移),
+    # 服务重启后 DL_CTX 丢失时按 src_115 续跑, 比 _find_thread_path 猜目录可靠
+    savepath = (ctx.get('savepath') or (get_task(task_id) or {}).get('src_115')
+                or _find_thread_path(str(thread_id or '')))
     if not savepath:
         save_task(task_id, status='failed', step='error',
                   msg='无法定位 115 目录(manual 任务重启后无法恢复), 请重新提交',
@@ -1669,7 +1736,7 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
             if new_units:
                 trig = []
                 for u in new_units:
-                    sub = f'{savepath.rstrip("/")}/{u}'
+                    sub = _unit_path(savepath, u)
                     _trigger_smartstrm(sub, category)
                     trig.append(sub)
                     time.sleep(1)
@@ -1871,6 +1938,12 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
 # (旧 IMPORT_MAX_CONCURRENT 已废弃, 保留读取仅为兼容 systemd 环境变量, 不再影响并发)
 _ = os.environ.get('IMPORT_MAX_CONCURRENT', '1')
 IMPORT_DL_CONCURRENT = max(1, int(os.environ.get('IMPORT_DL_CONCURRENT', '3') or '3'))  # 2026-08-15 二次优化: 已废弃, 离线下载不再限制并发 (保留仅为兼容 systemd 环境变量)
+
+# 2026-09-19: post 处理阶段并发 (此前写死 1 个 worker 严格串行)。
+# 实测瓶颈: post 单部 ~75s → 34-48 部/小时; 而 MDCng 单部仅 16s 且支持 4-5 并发,
+# 串行喂导致 MDCng 95% 时间闲置。提到 3 后 post 吞吐 ~70-100 部/小时。
+# 仍受 115 限频护栏 (_ratelimit_active) 保护; 可用 IMPORT_POST_CONCURRENT 覆盖。
+POST_CONCURRENT = max(1, int(os.environ.get('IMPORT_POST_CONCURRENT', '3') or '3'))
 RATELIMIT_STATE_FILE = '/tmp/115push_ratelimit_state.json'   # 本地版: 无 monitor_ratelimit2, 文件不存在即不限频
 RATELIMIT_STATE_STALE_S = 600   # state 文件超过 10 分钟未更新视为监控失效, 不再阻塞
 
@@ -1878,6 +1951,8 @@ DL_QUEUE = queue.Queue()
 POST_QUEUE = queue.Queue()
 _DL_WORKERS = []
 _POST_WORKERS = []
+_POST_WORKERS_LOCK = threading.Lock()   # 2026-09-19: 并发补齐 worker 时的互斥 (防多线程同时补出超额 worker)
+_POST_WORKER_SEQ = 0                    # 2026-09-19: worker 线程命名序号 (便于日志区分是哪个 worker)
 DL_CTX = {}   # task_id -> 离线下载阶段上下文 (savepath/title/kind/to_tv_mode/videos), POST 阶段消费后删除
 
 def _ratelimit_active():
@@ -1915,7 +1990,11 @@ def _dl_task_wrapper(fn, args):
             _DL_ACTIVE -= 1
 
 def _post_worker():
-    """处理 worker (固定 1 个, 严格串行)"""
+    """处理 worker (并发数 = POST_CONCURRENT, 默认 3; 2026-09-19 前为固定 1 个严格串行)。
+
+    每个 worker 独立从 POST_QUEUE 取任务执行, 同一时刻最多 POST_CONCURRENT 部在跑。
+    限频 (115) 期间不出队, 保持任务排队。
+    """
     while True:
         if _ratelimit_active():
             log.info('[queue] 115 限频中, 处理任务暂停出队, 等恢复后自动继续')
@@ -1934,21 +2013,31 @@ def _submit_dl(fn, args):
     threading.Thread(target=_dl_task_wrapper, args=(fn, tuple(args)), daemon=True).start()
 
 def _submit_post(fn, args):
-    """入队处理队列并确保 1 个串行 worker 存活; 立即返回"""
+    """入队处理队列并确保 POST_CONCURRENT 个 worker 存活; 立即返回"""
     POST_QUEUE.put((fn, tuple(args)))
     _ensure_post_workers()
 
 # (2026-08-15 二次优化: 离线下载不再限制并发, _ensure_dl_workers 已移除)
 
 def _ensure_post_workers():
-    """确保有 1 个处理 worker 线程在跑 (严格串行)"""
-    global _POST_WORKERS
-    alive = [w for w in _POST_WORKERS if w.is_alive()]
-    _POST_WORKERS = alive
-    if not _POST_WORKERS:
-        w = threading.Thread(target=_post_worker, daemon=True)
-        w.start()
-        _POST_WORKERS.append(w)
+    """确保 post 处理 worker 数达到 POST_CONCURRENT (默认 3)。
+
+    2026-09-19: 此前写死 1 个 worker 严格串行 → post 仅 34-48 部/小时,
+    而 MDCng 侧单部 16s / 支持 4-5 并发基本闲置。改为按需补齐到 POST_CONCURRENT 个;
+    存活的 worker 不重复创建, 死掉的自动补位。并发共享的 115 客户端有 _ratelimit_active 护栏,
+    DB 写在 save_task 里每次独立连接 (sqlite3 timeout=5s), 无线程安全问题。
+    """
+    global _POST_WORKERS, _POST_WORKER_SEQ
+    with _POST_WORKERS_LOCK:
+        _POST_WORKERS = [w for w in _POST_WORKERS if w.is_alive()]
+        while len(_POST_WORKERS) < POST_CONCURRENT:
+            _POST_WORKER_SEQ += 1
+            w = threading.Thread(target=_post_worker, daemon=True,
+                                 name='post-worker-%d' % _POST_WORKER_SEQ)
+            w.start()
+            _POST_WORKERS.append(w)
+            log.info('[queue] post worker 已启动: %s (当前并发 %d/%d, 队列积压 %d)',
+                     w.name, len(_POST_WORKERS), POST_CONCURRENT, POST_QUEUE.qsize())
 
 def queued_count():
     return _DL_ACTIVE + POST_QUEUE.qsize()
@@ -1965,6 +2054,591 @@ def start_import(thread_id=None, magnet=None, title=None, thread_url=None, kind=
               category=category, thread_url=(thread_url or '')[:500])
     _submit_dl(_run_import_dl, (task_id, thread_id, magnet, title, thread_url, kind, resume, category))
     return task_id
+
+# ============================== 批量入库 (2026-09-20) ==============================
+# 面板「多磁链一次提交」的后端: 一段文本里一行一条链接, 逐条建任务。
+# 设计约束: 单条 /api/import 语义不动(油猴脚本在用), 批量只是外面套一层循环 + 解析。
+BATCH_MAX_ITEMS = int(os.environ.get('BATCH_MAX_ITEMS', '100'))    # 单批上限
+_MAGNET_RE = re.compile(r'^magnet:\?', re.I)
+_ED2K_RE = re.compile(r'^ed2k://', re.I)
+_BTIH_RE = re.compile(r'^[0-9a-fA-F]{40}$')                        # 裸 info_hash -> 自动补成 magnet
+
+
+def _line_cat_override(tokens):
+    """摘掉行尾的 "#分类" 覆盖标记。返回 (剩余 token, cat|None, err|None)
+    只在行尾且以 # 开头时生效, 写错分类名报错而不是静默落回 av。"""
+    if not tokens:
+        return tokens, None, None
+    last = tokens[-1]
+    if last.startswith('#') and len(last) > 1:
+        key = last[1:].strip().lower()
+        if key not in CATEGORY_MAP:
+            return tokens, None, f'未知分类 #{key} (可用: {"/".join(CATEGORY_KEYS)})'
+        return tokens[:-1], key, None
+    return tokens, None, None
+
+
+def parse_link_lines(raw, default_kind=None, default_category=None):
+    """把多行文本(或字符串数组)解析成批次条目。
+
+    规则:
+      - 主用法是一行一条链接, 但一行里有多条(空格分隔)也全部识别, 不会粘成一条废链接
+      - 空行与以 # 开头的整行注释跳过
+      - 支持 magnet:?xt=urn:btih:... / ed2k://... / 裸 40 位 BTIH(自动补 magnet)
+      - 行尾可跟 "#<分类key>" 单条覆盖默认分类; 整行是 ed2k 时保留文件名里的空格(ed2k 常含空格)
+      - 同一链接重复出现只取第一条, 其余进 errors(显式告诉用户被跳过)
+    纯函数: 不碰 DB、不发网络请求, 供 POST /api/import/batch 与单测复用。
+    返回 (items, errors); items=[{magnet,kind,category,line}], errors=[{line,raw,error}]"""
+    if isinstance(raw, (list, tuple)):
+        lines = [str(x) for x in raw]
+    else:
+        lines = str(raw or '').replace('\r', '\n').split('\n')
+    items, errors, seen = [], [], {}
+    for idx, ln in enumerate(lines, 1):
+        s = ln.strip().strip('"').strip("'").strip()
+        if not s or s.startswith('#'):
+            continue
+        toks = [t.strip('"').strip("'") for t in s.split()]
+        toks, cat_ov, err = _line_cat_override(toks)
+        if err:
+            errors.append({'line': idx, 'raw': s[:120], 'error': err})
+            continue
+        if not toks:
+            continue
+        # ed2k 的文件名里常有空格("%20" 之外的写法也见得到) -> 整行当一条, 不按空格切;
+        # 行里同时出现 magnet: 时按空格切(用户多半是贴了一串磁力), 不做整行合并。
+        joined = ' '.join(toks)
+        if 'magnet:' in joined:
+            cands = toks
+        elif _ED2K_RE.match(joined):
+            cands = [joined]
+        else:
+            cands = toks
+        good, junk = [], []
+        for t in cands:
+            link = t
+            if _BTIH_RE.match(link):
+                link = 'magnet:?xt=urn:btih:' + link.upper()
+            # ed2k 结尾容错 (2026-09-21): 论坛/客户端有两种写法 —— 规范 "…|HASH|/" 与省略尾斜杠 "…|HASH|",
+            # 油猴脚本 normLink() 产出的正是后者。老规则只认前者, 会让批量提交里的 ed2k 全被当成
+            # "格式不完整" 拒掉(单条 /api/import 不走这里, 所以以前没暴露)。两种都收, 只挡真正被截断的行。
+            if _ED2K_RE.match(link) and not (re.search(r'\|/?$', link) and link.count('|') >= 4):
+                junk.append('ed2k 链接格式不完整 (应为 ed2k://|file|名字|大小|HASH|/ 或 …|HASH|)')
+                continue
+            if _MAGNET_RE.match(link) or _ED2K_RE.match(link):
+                if link in seen:
+                    junk.append(f'重复链接 (与第 {seen[link]} 行相同, 已跳过)')
+                    continue
+                seen[link] = idx
+                good.append(link)
+            else:
+                junk.append('不是 magnet:? / ed2k:// 链接 (裸 BTIH 必须 40 位十六进制)')
+        if not good:
+            errors.append({'line': idx, 'raw': s[:120], 'error': junk[0] if junk else '无有效链接'})
+            continue
+        for j in junk:
+            errors.append({'line': idx, 'raw': s[:120], 'error': j})
+        for link in good:
+            items.append({'magnet': link, 'kind': default_kind,
+                          'category': cat_ov or default_category, 'line': idx})
+    return items, errors
+
+
+def batch_import(raw_links, default_kind=None, default_category=None, dry_run=False,
+                 thread_id=None, title=None, thread_url=None):
+    """批量解析 + 逐条建任务。dry_run=True 只回解析结果, 不入队。
+    thread_id/title/thread_url (2026-09-21 新增, 默认 None 保持老调用兼容):
+      不传的话 start_import 会退化成无帖上下文 —— 落点变成 /sehuatang/<分类>/manual_<hash8>
+      (每条链接一个目录), 且 kind='non_fanhao' 走不到剧集模式(看 _run_import_dl 的 to_tv_mode)。
+      面板批量提交时必须带帖上下文, 保证与单条入库完全同构: 同 thread_<tid> 落点 / 剧集模式 / 📤元数据能对上目录。
+    返回 {submitted, failed, skipped, items[], errors[]} 或 {'error': ...}"""
+    if default_kind not in ('fanhao', 'non_fanhao'):
+        return {'error': 'kind 必填, 只能是 fanhao(影片/番号) 或 non_fanhao(剧集/非番号)'}
+    items, errors = parse_link_lines(raw_links, default_kind, norm_category(default_category))
+    if len(items) > BATCH_MAX_ITEMS:
+        return {'error': f'单批最多 {BATCH_MAX_ITEMS} 条, 当前 {len(items)} 条; 请分两批提交'}
+    # 帖上下文: 优先显式 thread_id, 否则从 thread_url 里抠 (与 /api/import 单条路径同一套规则)
+    tid = str(thread_id or '').strip()
+    if not tid and thread_url:
+        m = re.search(r'thread-(\d+)', thread_url) or re.search(r'[?&]tid=(\d+)', thread_url)
+        if m:
+            tid = m.group(1)
+    out = []
+    for it in items:
+        it['category'] = norm_category(it.get('category'))
+        row = {'magnet': it['magnet'][:100], 'kind': it['kind'],
+               'category': it['category'], 'line': it['line']}
+        if dry_run:
+            out.append(dict(row, ok=True, task_id=''))
+            continue
+        try:
+            row['task_id'] = start_import(magnet=it['magnet'], kind=it['kind'], category=it['category'],
+                                          thread_id=tid or None, title=title, thread_url=thread_url)
+            row['ok'] = True
+        except Exception as e:
+            row['ok'] = False
+            row['task_id'] = ''
+            row['error'] = str(e)[:200]
+            log.exception('[batch] 建任务失败: %s', it['magnet'][:80])
+        out.append(row)
+    ok = sum(1 for r in out if r['ok'])
+    if not dry_run:
+        log.info('[batch] 提交 %d 条 (失败 %d, 跳过 %d, thread %s): %s', ok, len(out) - ok, len(errors),
+                 tid or '-', ', '.join(r['task_id'] for r in out if r['ok'])[:300])
+    return {'dry_run': bool(dry_run), 'submitted': ok, 'failed': len(out) - ok,
+            'skipped': len(errors), 'thread_id': tid, 'items': out, 'errors': errors}
+
+
+# ============================== avdb adopt (2026-09-19) ==============================
+# avdb 下载 → 一键入库 的「入库侧连接器」落地逻辑。
+# 触发来源: avdb_watch.py 守护 (纯事件驱动, 只读 avdb 本地 sqlite, 平时对 115 零请求)
+#         或手动 POST /api/import/adopt。
+# 流程: 解析 avdb 下载记录 → 等这一部下完(退避轮询) → 就地按 avdb 原落点处理
+#       → 交现有处理管线(清理<500MB广告/重命名/strm/MDC刮削/Emby扫库), 不重新下载。
+# 2026-09-20 (用户决策): 取消"移到 /sehuatang/<分类>/thread_<番号>"那一步。
+#   115 侧搬移对最终结果零贡献 —— strm 用 pickcode 直链(移动不影响播放), 分类由
+#   本地 mdc-ng 的 watch_dirs(待看/sehuatang → 已刮削/AV) 决定, 且 115 侧最终只是
+#   平铺 thread_* 目录(无系列/番号层级), 语义上只是换桶不是分类。省掉每部 1 次 115 rename。
+AVDB_LIB = avdb_src.AVDB_LIB
+ADOPT_TIMEOUT = int(os.environ.get('ADOPT_TIMEOUT', '7200'))   # 等下载完成上限(秒), 默认 2h
+
+
+def _adopt_interval(elapsed):
+    """等待轮询退避: 前10分钟每分钟, 10-60分钟每3分钟, 之后每5分钟 (控制 115 请求量)"""
+    if elapsed < 600:
+        return 60
+    if elapsed < 3600:
+        return 180
+    return 300
+
+
+def _adopt_scan(p, dir_115):
+    """列 avdb 落点目录: 返回 (视频条目, 视频总字节, >=500MB 的大视频数)
+    列一层+子目录(maxdepth=3), 不递归全树"""
+    items = p.list_dir(dir_115, maxdepth=3, use_cache=False, use_cd2=True)
+    vids = [it for it in items if not it[4] and os.path.splitext(it[1])[1].lower() in MEDIA_EXTS]
+    total = sum(int(it[3] or 0) for it in vids)
+    big = [it for it in vids if int(it[3] or 0) >= KEEP_VIDEO_MIN]
+    return vids, total, big
+
+
+def _adopt_wait_ready(p, task_id, dir_115, number, info_hash='', timeout=None):
+    """等这一部下完。优先 CD2 离线任务状态(hash)精确判定; 任务已被清掉时退化
+    「目录里有 >=500MB 视频 且 连续两轮总大小不变」。等待期间轮询退避, 只查这一个目录。"""
+    timeout = timeout or ADOPT_TIMEOUT
+    t0 = time.time()
+    last_total = None
+    rounds = 0
+    while True:
+        el = time.time() - t0
+        if el > timeout:
+            save_task(task_id, status='failed', step='adopt_wait',
+                      msg=f'等待下载完成超过 {int(timeout / 60)} 分钟仍未检测到(可能磁力慢/无速度)。'
+                          f'可稍后在 115 网盘确认后重新 adopt: {number}',
+                      thread_id=str(number or ''), title=str(number or ''))
+            return False
+        done, why = False, ''
+        if info_hash:
+            try:
+                cd2 = p._cd2_client()
+                st = cd2.get_offline_status(info_hash, max_pages=1)
+                if st and st[0] == 2:
+                    done, why = True, '离线任务已完成'
+                elif st:
+                    why = f'离线任务下载中(status={st[0]})'
+                else:
+                    why = '离线任务已清理, 按目录大小确认'
+            except Exception as e:
+                log.warning('[adopt] 离线任务状态查询失败(退化列目录): %s', str(e)[:100])
+                why = '离线任务查询失败, 按目录大小确认'
+        else:
+            why = '按目录大小确认'
+        try:
+            vids, total, big = _adopt_scan(p, dir_115)
+        except Exception as e:
+            log.warning('[adopt] 列目录失败: %s', str(e)[:100])
+            vids, total, big = [], None, []
+        rounds += 1
+        if not done and big and rounds > 1 and last_total is not None and total == last_total:
+            done, why = True, '目录大小两轮不变'
+        last_total = total
+        if done and big:
+            save_task(task_id, status='running', step='adopt_wait',
+                      msg=f'avdb 下载已完成({why}), 视频 {len(vids)} 个, 开始入库',
+                      thread_id=str(number or ''), title=str(number or ''))
+            return True
+        if done and not big:
+            log.warning('[adopt] %s 判定完成但未见 >=500MB 视频, 再等一轮', number)
+            done = False
+        save_task(task_id, status='running', step='adopt_wait',
+                  msg=f'{number} 等待 avdb 下载完成({why or "下载中"}), 已等 {int(el / 60)} 分钟, '
+                      f'视频 {len(vids)} 个 / {round((total or 0) / 2 ** 30, 2)}GB',
+                  thread_id=str(number or ''), title=str(number or ''))
+        time.sleep(_adopt_interval(el))
+
+
+def _run_import_adopt(task_id, thread_id, number, src_dir, category, title, info_hash=''):
+    """adopt 下载阶段: 等完成 → 就地交处理阶段(清理/strm/刮削/扫库)
+    (2026-09-20 起不再迁移 115 目录, 见文件头 avdb adopt 段注释)"""
+    category = norm_category(category)
+    p = Push115()
+    try:
+        save_task(task_id, status='running', step='adopt_wait',
+                  msg=f'avdb 落点: {src_dir}, 等待下载完成',
+                  thread_id=str(thread_id or ''), title=(title or '')[:300], src_115=src_dir)
+        if not _adopt_wait_ready(p, task_id, src_dir, number, info_hash):
+            return
+        # 2026-09-20 (用户决策): 不再把 avdb 落点搬到 /sehuatang/<分类>/thread_<番号>。
+        #   ① strm 用 pickcode 直链 → 115 上搬到哪都不影响播放;
+        #   ② 最终分类由本地 mdc-ng 的 watch_dirs(待看/sehuatang → 已刮削/AV) 决定,
+        #      115 侧只是"平铺 thread_* 换平铺番号目录", 对 Emby 结果零贡献;
+        #   ③ 省掉每部 1 次 115 rename, 少一份 770004 风控面。
+        dst = src_dir
+        save_task(task_id, status='running', step='adopt_ready',
+                  msg='不迁移 115 目录, 直接按 avdb 原落点处理: %s' % src_dir,
+                  thread_id=str(thread_id or ''), title=(title or '')[:300])
+        DL_CTX[task_id] = {'savepath': dst, 'title': title, 'kind': 'fanhao',
+                           'to_tv_mode': False, 'videos': [], 'category': category}
+        save_task(task_id, status='running', step='wait',
+                  msg='排队等待处理(清理/strm/刮削/扫库, 并发 %d)...' % POST_CONCURRENT,
+                  thread_id=str(thread_id or ''), title=(title or '')[:300])
+        _submit_post(_run_import_post, (task_id, thread_id, '', title, '', 'fanhao', category))
+    except Exception as e:
+        log.exception('adopt failed')
+        save_task(task_id, status='failed', step='error', msg='adopt 异常: ' + str(e)[:300],
+                  thread_id=str(thread_id or ''), title=(title or '')[:300])
+
+
+def adopt_resolve(number=None, dl_id=None):
+    """解析 avdb 下载记录 → 该片在 115 的落点(只读 avdb 本地库 + 列一层 115 目录)。
+    返回 dict 或 {'error': ...}"""
+    row = None
+    if dl_id:
+        for r in avdb_src.fetch_downloads(after_id=int(dl_id) - 1, limit=1):
+            if int(r['id']) == int(dl_id):
+                row = r
+        if row is None:
+            return {'error': f'avdb download_log 无 id={dl_id}'}
+    elif number:
+        rows = avdb_src.fetch_downloads(after_id=0, limit=1000)
+        for r in reversed(rows):
+            if avdb_src.same_number(r.get('number') or '', number):
+                row = r
+                break
+        if row is None:
+            return {'error': f'avdb download_log 无番号 {number} 的记录'}
+    else:
+        return {'error': '需要 number 或 id'}
+    num = row.get('number') or ''
+    save_path = row.get('save_path') or ''
+    p = Push115()
+    info = avdb_src.resolve(num, p, save_path)
+    if not info.get('dir_115'):
+        return {'error': f'115 未找到 {num} 的落点目录 (avdb 记录 save_path={save_path})',
+                'number': num, 'dl_id': row['id'], 'save_path': save_path}
+    info['dl_id'] = row['id']
+    info['save_path'] = save_path
+    info['resource_name'] = row.get('resource_name') or ''
+    info['avdb_title'] = row.get('title') or ''
+    info['create_time'] = row.get('create_time') or ''
+    return info
+
+
+def start_adopt(number=None, dl_id=None, category=None, title=''):
+    """提交一个 avdb 入库任务(不重新下载)。返回 task_id 或抛异常"""
+    info = adopt_resolve(number=number, dl_id=dl_id)
+    if info.get('error'):
+        raise RuntimeError(info['error'])
+    category = norm_category(category)
+    thread_id = info['dir_name']
+    title = title or info.get('resource_name') or info.get('avdb_title') or info['number']
+    task_id = uuid.uuid4().hex[:12]
+    save_task(task_id, status='queued', step='adopt_init',
+              msg=f'avdb 入库任务已入队(不重新下载): {info["dir_115"]}',
+              thread_id=str(thread_id), magnet=(info.get('magnet') or '')[:200],
+              title=title[:300], kind='fanhao', category=category, src_115=info['dir_115'],
+              origin='avdb')
+    _submit_dl(_run_import_adopt,
+               (task_id, thread_id, info['number'], info['dir_115'], category,
+                title, Push115.link_hash(info.get('magnet') or '')))
+    return task_id
+
+
+# ============================== avdb 连接器: 面板后端 ==============================
+# 2026-09-19: avdb 下载联动有自己的一套状态 (守护水位 / 台账), 与色花堂入库任务分开显示,
+# 面板走独立页面 /avdb + 独立接口 /api/avdb/*, 不混进 /tasks 主列表。
+AVDB_LEDGER = os.environ.get('AVDB_WATCH_DB', '/var/lib/avdb-watch/avdb_watch.db')
+AVDB_PAUSE_FILE = '/tmp/avdb_watch.pause'
+
+
+def _avdb_ledger_conn(readonly=True):
+    if not os.path.exists(AVDB_LEDGER):
+        return None
+    try:
+        if readonly:
+            return sqlite3.connect('file:%s?mode=ro' % AVDB_LEDGER, uri=True, timeout=5)
+        return sqlite3.connect(AVDB_LEDGER, timeout=10)
+    except Exception as e:
+        log.warning('[avdb] 打开台账失败: %s', str(e)[:120])
+        return None
+
+
+def _avdb_state():
+    """台账 state 表 (水位/心跳/间隔)"""
+    c = _avdb_ledger_conn()
+    if not c:
+        return {}
+    try:
+        return {str(k): ('' if v is None else str(v)) for k, v in c.execute('SELECT k, v FROM state').fetchall()}
+    except Exception:
+        return {}
+    finally:
+        c.close()
+
+
+def _avdb_seen(limit=300):
+    """台账 seen 表 (最新在前)"""
+    c = _avdb_ledger_conn()
+    if not c:
+        return []
+    try:
+        cols = [d[1] for d in c.execute('PRAGMA table_info(seen)').fetchall()]
+        if not cols:
+            return []
+        rows = c.execute('SELECT %s FROM seen ORDER BY dl_id DESC LIMIT ?' % ','.join(cols),
+                         (int(limit),)).fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception:
+        return []
+    finally:
+        c.close()
+
+
+def _avdb_ledger_mark(dl_id, number='', dir_name='', task_id='', status='', note=''):
+    """写台账 (手动补扫按守护的口径记账, 避免守护重复接手同一部)"""
+    c = _avdb_ledger_conn(readonly=False)
+    if not c:
+        return False
+    try:
+        c.execute('''INSERT INTO seen(dl_id, number, dir_name, task_id, status, note) VALUES(?,?,?,?,?,?)
+                     ON CONFLICT(dl_id) DO UPDATE SET number=excluded.number, dir_name=excluded.dir_name,
+                     task_id=COALESCE(NULLIF(excluded.task_id,''), seen.task_id),
+                     status=excluded.status, note=excluded.note, updated_at=datetime('now','localtime')''',
+                  (int(dl_id), number, dir_name, task_id, status, note[:200]))
+        c.commit()
+        return True
+    except Exception as e:
+        log.warning('[avdb] 台账写入失败: %s', str(e)[:120])
+        return False
+    finally:
+        c.close()
+
+
+def _avdb_task_map():
+    """台账 task_id → 入库任务状态 (面板上点开能看到进度)"""
+    ids = [r.get('task_id') for r in _avdb_seen() if r.get('task_id')]
+    if not ids:
+        return {}
+    c = sqlite3.connect(LOG_DB)
+    try:
+        out = {}
+        for i in range(0, len(ids), 200):
+            ch = ids[i:i + 200]
+            ph = ','.join(['?'] * len(ch))
+            for r in c.execute(f'SELECT task_id, status, step, msg, thread_id FROM import_log WHERE task_id IN ({ph})', ch):
+                out[r[0]] = {'status': r[1], 'step': r[2], 'msg': r[3], 'thread_id': r[4]}
+        return out
+    except Exception:
+        return {}
+    finally:
+        c.close()
+
+
+def avdb_status():
+    """连接器面板数据。只读 avdb 本地 sqlite + 本地台账, **零网络请求**"""
+    st = _avdb_state()
+    seen = _avdb_seen()
+    try:
+        interval = int(st.get('interval') or 60)
+    except Exception:
+        interval = 60
+    try:
+        hb = float(st.get('heartbeat') or 0)
+    except Exception:
+        hb = 0.0
+    age = int(time.time() - hb) if hb else None
+    alive = bool(hb) and age is not None and age < max(180, interval * 3)
+    try:
+        wm = int(st.get('watermark'))
+    except Exception:
+        wm = None
+    try:
+        max_id = avdb_src.max_download_id()
+    except Exception:
+        max_id = None
+    pending = []
+    if wm is not None:
+        try:
+            for r in avdb_src.fetch_downloads(after_id=wm, limit=100):
+                pending.append({'dl_id': r['id'], 'number': (r.get('number') or ''),
+                                'title': (r.get('title') or '')[:90],
+                                'save_path': r.get('save_path') or '',
+                                'create_time': r.get('create_time') or ''})
+        except Exception:
+            pass
+    by_status = {}
+    for r in seen:
+        k = r.get('status') or ''
+        by_status[k] = by_status.get(k, 0) + 1
+    tmap = _avdb_task_map()
+    done_names = _imported_names() if any(not (r.get('task_id') or '') for r in seen) else []
+    for r in seen:
+        t = tmap.get(r.get('task_id') or '') or {}
+        r['task_status'] = t.get('status', '')
+        r['task_step'] = t.get('step', '')
+        r['task_msg'] = (t.get('msg') or '')[:120]
+        # 台账状态为 missing/skipped(落点已迁走) → 若该番号其实已入库, 面板显示「已在库里」
+        r['imported_task'] = ''
+        if not r.get('task_id') and r.get('number'):
+            for nm, tid in done_names:
+                if avdb_src.same_number(nm, r['number']):
+                    r['imported_task'] = tid
+                    break
+    return {
+        'guard': {'alive': alive, 'heartbeat': hb, 'age': age, 'interval': interval,
+                  'paused': os.path.exists(AVDB_PAUSE_FILE),
+                  'category': st.get('category') or 'av', 'pid': st.get('pid') or '',
+                  'rounds': st.get('rounds') or ''},
+        'watermark': wm, 'avdb_max_id': max_id,
+        'ledger': {'total': len(seen), 'by_status': by_status},
+        'pending': pending,
+        'pending_count': len(pending),
+        'seen': seen[:150],
+        'ledger_path': AVDB_LEDGER,
+        'avdb_lib': avdb_src.AVDB_LIB,
+    }
+
+
+def _imported_names():
+    """已完成入库任务的番号/名称 → [(name, task_id)]，供补扫判定「已在库里」。"""
+    out = []
+    try:
+        c = sqlite3.connect(LOG_DB)
+        for tid, th, title, src in c.execute(
+                "SELECT task_id, thread_id, title, src_115 FROM import_log WHERE status='done'"):
+            for nm in (th, title, os.path.basename((src or '').rstrip('/'))):
+                if nm:
+                    out.append((str(nm), tid))
+        c.close()
+    except Exception as e:
+        log.warning('_imported_names 查询失败: %s', str(e)[:120])
+    return out
+
+
+def avdb_scan(limit=40, do_adopt=False, category='av'):
+    """手动补扫: 找 avdb 里「没进台账、但 115 上确实有落点」的漏网片。
+    每个 save_path 只列一次 115 目录, 之后纯本地匹配 (不按片逐条查 115)。
+    台账 status='missing' 的不再放行 (2026-09-20): 见循环里 has_ledger 的说明。"""
+    rows = avdb_src.fetch_downloads(after_id=0, limit=1000)
+    if limit:
+        rows = rows[-int(limit):]
+    led = {int(r['dl_id']): r for r in _avdb_seen(limit=1000) if r.get('dl_id') is not None}
+    p = Push115()
+    cache = {}
+
+    def _pairs(sp):
+        key = sp or ''
+        if key in cache:
+            return cache[key]
+        try:
+            dirs, root = avdb_src.list_avdb_dirs(p, sp)
+        except Exception:
+            dirs, root = [], (avdb_src.AVDB_LIB.rstrip('/') + ('/' + key.strip('/') if key else ''))
+        cache[key] = [(root.rstrip('/') + '/' + d, d) for d in dirs]
+        return cache[key]
+
+    def _all_pairs(sp):
+        out = list(_pairs(sp))
+        for _path, top in _pairs(''):
+            out += _pairs(top)
+        return out
+
+    out, n_adopted, n_cand = [], 0, 0
+    done_rows = _imported_names()
+    for r in rows:
+        dl_id = int(r['id'])
+        num = (r.get('number') or '').strip()
+        sp = r.get('save_path') or ''
+        item = {'dl_id': dl_id, 'number': num, 'save_path': sp,
+                'title': (r.get('title') or '')[:90],
+                'create_time': r.get('create_time') or '',
+                'resource_name': (r.get('resource_name') or '')[:120],
+                'status': '', 'dir_115': '', 'task_id': ''}
+        prev = led.get(dl_id) or {}
+        prev_status = (prev.get('status') or '').strip()
+        # missing 不是终态 (2026-09-20 修): 原来把 missing 当已处理直接放行, 导致 20 部 / 184GB
+        # 片子永远躺在 avdb 暂存区 (守护不重试 + 补扫也不查)。判 missing 的真实原因只有两类:
+        #   ① 番号写法对不上 (SQTE-701 vs SQTE-701_4KS / JNT-104 vs 390JNT-104-uncensored-HD ...)
+        #   ② 抢在 115 下载落地之前判定 (竞态)
+        # 两类都值得复查 → 只放行「显式 skipped」和「已起过入库任务(task_id)」的。
+        has_ledger = bool(prev.get('task_id') or prev_status == 'skipped')
+        if not num:
+            if has_ledger:
+                item['status'] = 'ledger'
+                item['ledger_status'] = prev.get('status') or ''
+                item['task_id'] = prev.get('task_id') or ''
+                item['dir_115'] = prev.get('dir_name') or ''
+            else:
+                item['status'] = 'no_number'
+            out.append(item)
+            continue
+        # 已在库里 (入库任务已 done, 落点已被迁走) → 不是漏网, 不重复入库
+        hit_tid = ''
+        for nm, tid in done_rows:
+            if nm and avdb_src.same_number(nm, num):
+                hit_tid = tid
+                break
+        if hit_tid:
+            item['status'] = 'done_imported'
+            item['task_id'] = hit_tid
+            item['dir_115'] = (prev.get('dir_name') or '')
+            out.append(item)
+            continue
+        if has_ledger:
+            item['status'] = 'ledger'
+            item['ledger_status'] = prev.get('status') or ''
+            item['task_id'] = prev.get('task_id') or ''
+            item['dir_115'] = prev.get('dir_name') or ''
+            out.append(item)
+            continue
+        hit_path = None
+        for path, d in _all_pairs(sp):
+            if avdb_src.same_number(d, num):
+                hit_path = path
+                break
+        if not hit_path:
+            item['status'] = 'not_on_115'
+            out.append(item)
+            continue
+        item['status'] = 'candidate'
+        item['dir_115'] = hit_path
+        n_cand += 1
+        if do_adopt:
+            try:
+                tid = start_adopt(number=num, dl_id=dl_id, category=category)
+                item['status'] = 'adopted'
+                item['task_id'] = tid
+                n_adopted += 1
+                _avdb_ledger_mark(dl_id, number=num, dir_name=os.path.basename(hit_path),
+                                  task_id=tid, status='submitted',
+                                  note='手动补扫 → src=%s' % hit_path)
+            except Exception as e:
+                item['status'] = 'adopt_failed'
+                item['error'] = str(e)[:160]
+        out.append(item)
+    out.reverse()
+    return {'scanned': len(rows), 'candidates': n_cand, 'adopted': n_adopted, 'items': out}
+
 
 def _find_thread_path(thread_id):
     """定位 thread 的 115 目录: 优先剧集媒体库 /sehuatang_tv/, 然后分类目录 /sehuatang/<分类>/, 最后旧平铺 /sehuatang/"""
@@ -2956,238 +3630,8 @@ def start_tv_refresh(thread_id, title=None):
     return task_id
 
 # ============================== HTTP ==============================
-HTML_PAGE = r"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>一键入库</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0d1117;color:#c9d1d9;min-height:100vh}
-.header{background:#161b22;border-bottom:1px solid #30363d;padding:16px 24px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.header h1{font-size:20px;color:#58a6ff}
-.header .tag{font-size:12px;color:#8b949e;background:#21262d;padding:3px 10px;border-radius:12px}
-.header .spacer{flex:1}
-.header a{color:#58a6ff;text-decoration:none;font-size:14px}
-.container{max-width:860px;margin:0 auto;padding:24px}
-.panel{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:20px 22px;margin-bottom:16px}
-.panel h2{font-size:15px;color:#58a6ff;margin-bottom:14px}
-.manual-box{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.manual-box label{color:#8b949e;font-size:13px;white-space:nowrap}
-.manual-box input[type="text"]{flex:1;min-width:260px;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;outline:none}
-.manual-box input[type="text"]:focus{border-color:#58a6ff}
-select{padding:9px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;outline:none}
-.btn{padding:10px 18px;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:14px;font-weight:600;white-space:nowrap}
-.btn-import{background:#1f6feb}
-.btn-import:hover{background:#388bfd}
-.btn-import:disabled{background:#30363d;cursor:default}
-.btn-clear{background:#484f58}
-.btn-clear:hover{background:#5b6672}
-.btn-login{background:#6e40c9}
-.btn-login:hover{background:#8957e5}
-.hint{font-size:12px;color:#8b949e;margin-top:10px;line-height:1.7}
-.hint a{color:#58a6ff}
-.toast{position:fixed;top:20px;right:20px;background:#238636;color:#fff;padding:12px 20px;border-radius:8px;z-index:999;animation:fadein .3s}
-.toast.err{background:#da3633}
-@keyframes fadein{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
-.task-panel{position:fixed;bottom:20px;right:20px;width:380px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;z-index:99;box-shadow:0 4px 20px rgba(0,0,0,.4)}
-.task-panel .panel-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
-.task-panel h3{font-size:14px;color:#58a6ff;margin:0}
-.task-panel .panel-toggle{background:none;border:none;color:#8b949e;cursor:pointer;font-size:13px;padding:2px 8px;border-radius:4px}
-.task-panel .panel-toggle:hover{background:#21262d;color:#c9d1d9}
-.task-panel.collapsed{width:auto;min-width:120px;padding:10px 12px}
-.task-panel.collapsed #taskList{display:none}
-.task-item{font-size:13px;padding:6px 0;border-top:1px solid #30363d;display:flex;gap:8px;align-items:flex-start}
-.task-item .st{flex:1}
-.task-item .st .msg{color:#8b949e;font-size:12px}
-.task-item .close{color:#8b949e;cursor:pointer;border:none;background:none;font-size:14px}
-@media (max-width:768px){.task-panel{width:calc(100% - 16px);right:8px;bottom:8px;max-height:50vh;overflow-y:auto}}
-</style>
-</head>
-<body>
-<div class="header">
-    <h1>🚀 一键入库</h1>
-    <span class="tag">磁力/电驴 → 115 → strm → MDC刮削/油猴补充 → Emby</span>
-    <div class="spacer"></div>
-    <a href="/tasks">📋 任务监控</a>
-    <button class="btn btn-login" onclick="openLogin()">📱 115 扫码登录</button>
-</div>
-<div class="container">
-    <div class="panel">
-        <h2>磁力/电驴直链入库</h2>
-        <div class="manual-box">
-            <label>链接:</label>
-            <input type="text" id="manualMagnet" placeholder="粘贴 magnet:?xt=urn:btih:... 或 ed2k://|file|... 直接推送入库">
-            <label>类型:</label>
-            <select id="manualKind">
-                <option value="fanhao">影片 (番号, MDC 刮削)</option>
-                <option value="non_fanhao">剧集 (非番号, 油猴补充元数据)</option>
-            </select>
-            <button class="btn btn-clear" onclick="clearManual()" title="清空输入框">清空</button>
-            <button class="btn btn-import" onclick="manualImport()">入库</button>
-        </div>
-        <div class="hint">
-            💡 <b>影片</b>: 推磁力 → 等落地 → 清理广告小文件 → strm → MDC 刮削 → Emby 刷新 → 预热；MDC 刮削失败时在<b>帖子页用油猴脚本</b>补充元数据。<br>
-            💡 <b>剧集</b>: 推磁力 → 等落地(任务显示<b>待整理</b>停住) → 先在 115 网盘手工整理视频 → 到任务页点<b>🔄整理</b> → 命名「原名.thread_x.S01E续集号」→ strm 生成 → 在<b>帖子页用油猴脚本</b>补充元数据 → 自动刷新 Emby + 预热。<br>
-            📌 任务完成后请到 <a href="/tasks">任务监控页</a> 点击 thread 号直接打开原帖，用油猴「📤 上传元数据」补充缺失的元数据。
-        </div>
-    </div>
-</div>
-<div class="task-panel" id="taskPanel" style="display:none">
-    <div class="panel-head">
-        <h3>入库任务</h3>
-        <button class="panel-toggle" id="taskToggle" onclick="toggleTaskPanel()">收起 ▾</button>
-    </div>
-    <div id="taskList"></div>
-</div>
-<script>
-var pollTimers = {};
-
-function toast(msg, isErr) {
-    var t = document.createElement('div');
-    t.className = 'toast' + (isErr ? ' err' : '');
-    t.textContent = msg;
-    document.body.appendChild(t);
-    setTimeout(function(){ t.remove(); }, 4000);
-}
-
-function esc(s) {
-    return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-function showTaskPanel() {
-    var p = document.getElementById('taskPanel');
-    p.style.display = 'block';
-    p.classList.remove('collapsed');
-}
-function toggleTaskPanel() {
-    var p = document.getElementById('taskPanel');
-    p.classList.toggle('collapsed');
-    document.getElementById('taskToggle').textContent = p.classList.contains('collapsed') ? '展开 ▸' : '收起 ▾';
-}
-function addTaskRow(taskId, label, status, msg) {
-    showTaskPanel();
-    var list = document.getElementById('taskList');
-    var row = document.createElement('div');
-    row.className = 'task-item';
-    row.id = 'task-' + taskId;
-    row.innerHTML = '<div class="st"><div><b>' + esc(label) + '</b> <span class="badge"></span></div><div class="msg"></div></div>' +
-        '<span class="close" onclick="closeTask(\'' + taskId + '\')">✕</span>';
-    list.appendChild(row);
-    updateTaskRow(taskId, status, msg);
-}
-function updateTaskRow(taskId, status, msg) {
-    var row = document.getElementById('task-' + taskId);
-    if (!row) return;
-    row.querySelector('.badge').textContent = status || '';
-    row.querySelector('.msg').textContent = msg || '';
-    if (status === 'done' || status === 'failed') {
-        row.querySelector('.badge').style.color = status === 'done' ? '#3fb950' : '#f85149';
-    }
-}
-function closeTask(taskId) {
-    var row = document.getElementById('task-' + taskId);
-    if (row) row.remove();
-    if (pollTimers[taskId]) { clearInterval(pollTimers[taskId]); delete pollTimers[taskId]; }
-}
-async function pollTask(taskId) {
-    var res = await fetch('/api/import/status?task_id=' + encodeURIComponent(taskId));
-    var data = await res.json();
-    if (data.error) { clearInterval(pollTimers[taskId]); delete pollTimers[taskId]; return; }
-    updateTaskRow(taskId, data.status, data.msg);
-    if (data.status === 'done' || data.status === 'failed') {
-        clearInterval(pollTimers[taskId]);
-        delete pollTimers[taskId];
-    }
-}
-
-function clearManual() {
-    document.getElementById('manualMagnet').value = '';
-}
-
-async function manualImport() {
-    var magnet = document.getElementById('manualMagnet').value.trim();
-    var kind = document.getElementById('manualKind').value;
-    if (!magnet) { toast('请粘贴磁力或电驴链接', true); return; }
-    var isMagnet = magnet.indexOf('magnet:') === 0;
-    var isEd2k = magnet.indexOf('ed2k://') === 0;
-    if (!isMagnet && !isEd2k) { toast('仅支持 magnet: 或 ed2k:// 链接', true); return; }
-    showTaskPanel();
-    try {
-        var res = await fetch('/api/import', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({magnet: magnet, kind: kind})
-        });
-        var data = await res.json();
-        if (data.error) { toast('入库失败: ' + data.error, true); return; }
-        addTaskRow(data.task_id, isEd2k ? '手动电驴' : '手动磁力', 'queued', '任务已创建');
-        pollTimers[data.task_id] = setInterval(function(){ pollTask(data.task_id); }, 3000);
-        toast('已提交入库');
-    } catch(e) { toast('请求失败: ' + e.message, true); }
-}
-</script>
-<!-- 115 扫码全局登录弹窗 -->
-<div id="loginModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);z-index:999;align-items:center;justify-content:center">
-    <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;width:340px;text-align:center">
-        <h3 style="color:#58a6ff;margin-bottom:8px">115 扫码全局登录</h3>
-        <div style="color:#8b949e;font-size:13px;margin-bottom:16px">用手机 115 App 扫一扫, 登录后凭证将自动分发</div>
-        <div id="qrBox" style="background:#fff;border-radius:8px;padding:8px;margin:0 auto 12px;width:240px;height:240px;display:flex;align-items:center;justify-content:center;color:#8b949e;font-size:13px">生成中...</div>
-        <div id="loginStatus" style="color:#c9d1d9;font-size:13px;min-height:20px;margin-bottom:12px">请稍候...</div>
-        <div style="display:flex;gap:8px;justify-content:center">
-            <button onclick="closeLogin()" style="padding:8px 20px;background:#30363d;border:none;border-radius:6px;color:#c9d1d9;cursor:pointer">关闭</button>
-            <button id="btnLoginAgain" onclick="startLogin()" style="display:none;padding:8px 20px;background:#6e40c9;border:none;border-radius:6px;color:#fff;cursor:pointer">重新生成二维码</button>
-        </div>
-    </div>
-</div>
-<script>
-var loginTimer = null;
-
-function openLogin() {
-    document.getElementById('loginModal').style.display = 'flex';
-    startLogin();
-}
-
-function closeLogin() {
-    document.getElementById('loginModal').style.display = 'none';
-    if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
-}
-
-function startLogin() {
-    var box = document.getElementById('qrBox');
-    var st = document.getElementById('loginStatus');
-    box.innerHTML = '生成中...';
-    st.textContent = '正在生成二维码...';
-    document.getElementById('btnLoginAgain').style.display = 'none';
-    fetch('/api/login/qrcode').then(function(r){return r.json()}).then(function(d){
-        box.innerHTML = '<img src="/api/login/qrcode.png" style="width:220px;height:220px">';
-        st.textContent = (d.msg || '请用 115 App 扫码确认') + ' (180秒内有效)';
-    }).catch(function(e){ st.textContent = '生成失败: ' + e.message; });
-    if (loginTimer) clearInterval(loginTimer);
-    loginTimer = setInterval(pollLogin, 2500);
-}
-
-function pollLogin() {
-    fetch('/api/login/status').then(function(r){return r.json()}).then(function(d){
-        var st = document.getElementById('loginStatus');
-        if (d.status === 'done') {
-            st.innerHTML = '<span style="color:#7ee787">✅ ' + (d.msg || '全局登录成功') + '</span>';
-            if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
-        } else if (d.status === 'failed') {
-            st.innerHTML = '<span style="color:#f85149">' + (d.msg || '登录失败') + '</span>';
-            document.getElementById('btnLoginAgain').style.display = 'inline-block';
-            if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
-        } else if (d.status === 'running') {
-            st.textContent = d.msg || '等待扫码...';
-        } else {
-            st.textContent = '状态: ' + d.status;
-        }
-    }).catch(function(e){});
-}
-</script>
-</body>
-</html>"""
+# 首页 HTML 已抽到 index_page.py (2026-09-20): 批量入库页 = 多磁链 + 分类下拉 + 解析预览 + 批次进度。
+# 分类表由 render_index_page(CATEGORY_MAP, DEFAULT_CATEGORY) 在请求时注入, 前端不硬编码分类名。
 
 
 TASKS_PAGE = r"""<!DOCTYPE html>
@@ -3203,8 +3647,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .header h1{font-size:20px;color:#58a6ff}
 .header .tag{font-size:12px;color:#8b949e;background:#21262d;padding:3px 10px;border-radius:12px}
 .header .spacer{flex:1}
-.header a{color:#58a6ff;text-decoration:none;font-size:13px;margin-left:12px}
-.container{max-width:1280px;margin:0 auto;padding:20px 24px}
+.container{max-width:1440px;margin:0 auto;padding:20px 24px}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:18px}
 .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 16px}
 .card .num{font-size:26px;font-weight:700;margin-top:4px}
@@ -3212,21 +3655,48 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .card.total .num{color:#58a6ff}.card.queued .num{color:#8b949e}
 .card.running .num{color:#58a6ff}.card.done .num{color:#3fb950}
 .card.failed .num{color:#f85149}
+.card.avdbsrc .num{color:#d29922}
+.card.pendingmd .num{color:#d29922}
 .bar{display:flex;gap:8px;margin-bottom:14px;align-items:center;flex-wrap:wrap}
 .bar input[type="text"]{flex:1;min-width:220px;padding:8px 14px;background:#161b22;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;outline:none}
 .bar input[type="text"]:focus{border-color:#58a6ff}
 .tabs{display:flex;gap:6px;flex-wrap:wrap}
 .tab{padding:7px 14px;background:#21262d;border:1px solid #30363d;border-radius:20px;color:#8b949e;font-size:13px;cursor:pointer;user-select:none}
 .tab.active{background:#1f6feb;border-color:#1f6feb;color:#fff}
-.btn{padding:8px 16px;background:#238636;border:1px solid #2ea043;border-radius:6px;color:#fff;font-weight:600;cursor:pointer;font-size:13px}
-.btn:hover{background:#2ea043}
+/* ===== 按钮统一规范 (2026-09-20)：与 / 、/avdb 三页同一套尺寸/配色 ===== */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:34px;padding:0 15px;border:1px solid transparent;border-radius:6px;font-family:inherit;font-size:13px;font-weight:600;line-height:1;cursor:pointer;white-space:nowrap;color:#c9d1d9;text-decoration:none;transition:background .15s,border-color .15s,color .15s}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.sm{height:30px;padding:0 11px;font-size:12.5px;font-weight:600}
+.btn.primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
+.btn.primary:hover:enabled{background:#388bfd;border-color:#388bfd}
 .btn.ghost{background:#21262d;border-color:#30363d;color:#c9d1d9}
-.btn.ghost:hover{border-color:#8b949e}
+.btn.ghost:hover:enabled{background:#30363d;border-color:#8b949e}
+.btn.ok{background:#238636;border-color:#2ea043;color:#fff}
+.btn.ok:hover:enabled{background:#2ea043}
+.btn.warn{background:#21262d;border-color:#9e6a03;color:#d29922}
+.btn.warn:hover:enabled{background:#3d2e00}
+.btn.danger{background:#21262d;border-color:#4d2c2c;color:#f85149}
+.btn.danger:hover:enabled{background:#3d1418;border-color:#f85149}
+.btn.purple{background:#6e40c9;border-color:#6e40c9;color:#fff}
+.btn.purple:hover:enabled{background:#8957e5}
+.nav{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+/* 非当前页导航必须显式声明 color/background：.btn 基础样式没有 color，锚点会回退成浏览器默认
+   链接色(未访问 #0000ee / 已访问 #551a8b)，在 #161b22 上只有 1.8:1，看着就是糊在背景上的暗字 */
+.nav a.btn{background:#21262d;border-color:#30363d;color:#c9d1d9}
+.nav a.btn:hover{background:#30363d;border-color:#8b949e;color:#c9d1d9}
+.nav a.btn.cur{background:#193656;border-color:#58a6ff;color:#58a6ff}
+.nav a.btn.avdb.cur{background:#483600;border-color:#d29922;color:#d29922}
+.plink{color:#58a6ff;font-size:12px;text-decoration:none}
+.plink:hover{text-decoration:underline}
+.panel-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid #21262d}
+.tools{display:flex;gap:8px;align-items:center;margin-left:auto}
 table{width:100%;border-collapse:collapse;background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+.tw{overflow-x:auto}
 th,td{padding:10px 12px;text-align:left;border-bottom:1px solid #21262d;font-size:13px;vertical-align:middle}
 th{background:#21262d;color:#8b949e;font-weight:600;white-space:nowrap}
 tr:hover td{background:#1c2128}
-td .t{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+td .t{max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+td .tid{display:inline-block;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
 .badge{display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600;white-space:nowrap}
 .badge.queued{background:#21262d;color:#8b949e;border:1px solid #30363d}
 .badge.running{background:#1f6feb22;color:#58a6ff;border:1px solid #1f6feb}
@@ -3237,8 +3707,9 @@ td .t{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .progress .fill{height:100%;background:#58a6ff;border-radius:4px;transition:width .4s}
 .progress .fill.done{background:#3fb950}
 .progress .fill.failed{background:#f85149}
+.progress .fill.pending{background:#d29922}
 .pct{font-size:12px;color:#8b949e;margin-left:6px;white-space:nowrap}
-.msg{max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8b949e}
+.msg{max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8b949e}
 .pager{display:flex;gap:8px;justify-content:center;align-items:center;margin-top:14px}
 .pager span{color:#8b949e;font-size:13px}
 .empty{text-align:center;color:#8b949e;padding:40px 0;font-size:14px}
@@ -3267,20 +3738,64 @@ input[type=checkbox]{accent-color:#1f6feb}
 .rescrape .rs-tid{font-size:12px;color:#58a6ff;margin-top:4px}
 .rescrape .rs-title{font-size:13px;color:#8b949e;margin-bottom:8px}
 .rescrape .rs-btns{display:flex;gap:8px;flex-wrap:wrap}
-.rs-btns button{padding:8px 14px;border-radius:6px;border:none;cursor:pointer;font-weight:600;font-size:13px;color:#fff}
+.rs-btns button{display:inline-flex;align-items:center;justify-content:center;height:30px;padding:0 12px;border-radius:6px;border:none;cursor:pointer;font-weight:600;font-size:12.5px;line-height:1;color:#fff;font-family:inherit;transition:background .15s}
 .rs-btns .rs-mdc{background:#6e40c9}
 .rs-btns .rs-mdc:hover{background:#8957e5}
 .rs-btns .rs-web{background:#1f6feb}
 .rs-btns .rs-web:hover{background:#388bfd}
 .rs-btns .rs-tv{background:#238636}
 .rs-btns .rs-tv:hover{background:#2ea043}
-.repush{background:#d64045;border-color:#d64045;color:#fff}
-.repush:hover{background:#f2555a}
 .rs-btns .rs-repush{background:#d64045}
 .rs-btns .rs-repush:hover{background:#f2555a}
 .rs-btns .rs-confirm{background:#1a7f37}
 .rs-btns .rs-confirm:hover{background:#238636}
 .rescrape .rs-hint{font-size:12px;color:#8b949e;margin-top:6px}
+/* ===== A/B/C 组增强 (2026-09-20) ===== */
+.card{cursor:pointer;transition:border-color .15s,background .15s}
+.card:hover{border-color:#8b949e}
+.card.on{border-color:#58a6ff;background:#1f6feb14;box-shadow:0 0 0 1px #58a6ff inset}
+.card .num{font-variant-numeric:tabular-nums}
+th.sortable{cursor:pointer;user-select:none}
+th.sortable:hover{color:#c9d1d9}
+th.sortable .ar{font-size:10px;margin-left:4px;color:#58a6ff}
+tr.row-failed td{background:#f851490d}
+tr.row-failed td:first-child{box-shadow:inset 3px 0 0 #f85149}
+tr.row-done td{background:#2386360a}
+.badge.running{animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.catbadge{display:inline-block;padding:2px 9px;border-radius:12px;font-size:12px;font-weight:600;white-space:nowrap;border:1px solid}
+.catbadge.c-av{background:#1f6feb22;color:#58a6ff;border-color:#1f6feb}
+.catbadge.c-fc2{background:#6e40c922;color:#a371f7;border-color:#6e40c9}
+.catbadge.c-sw{background:#db61a222;color:#db61a2;border-color:#db61a2}
+.catbadge.c-cn{background:#d2992222;color:#d29922;border-color:#d29922}
+.catbadge.c-ea{background:#23863622;color:#3fb950;border-color:#2ea043}
+.catbadge.c-lf{background:#f8514922;color:#f85149;border-color:#f85149}
+.catbadge.c-none{background:#21262d;color:#8b949e;border-color:#30363d}
+.sel{height:34px;padding:0 10px;background:#161b22;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-family:inherit;font-size:13px;outline:none;cursor:pointer}
+.sel:focus{border-color:#58a6ff}
+.bar2{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+.bar2 .spacer{flex:1}
+.bar{margin-bottom:10px}
+.msgcell{max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8b949e;cursor:default}
+.msgcell.open{white-space:normal;max-width:340px;word-break:break-all}
+.msg-wrap{display:flex;gap:6px;align-items:flex-start}
+.msg-more{background:none;border:none;color:#58a6ff;cursor:pointer;font-size:12px;padding:0;font-family:inherit;flex:none}
+.empty .eacts{margin-top:14px;display:flex;gap:8px;justify-content:center}
+.btn:focus-visible,.tab:focus-visible,.sel:focus-visible,.msg-more:focus-visible,.card:focus-visible,th.sortable:focus-visible{outline:2px solid #58a6ff;outline-offset:2px}
+/* toast */
+.toasts{position:fixed;top:16px;right:16px;z-index:200;display:flex;flex-direction:column;gap:10px;max-width:380px}
+.toast{display:flex;gap:10px;align-items:flex-start;padding:11px 14px;border-radius:8px;font-size:13px;line-height:1.5;background:#161b22;border:1px solid #30363d;border-left:4px solid #8b949e;box-shadow:0 6px 22px rgba(0,0,0,.45);animation:tin .18s ease-out}
+.toast.ok{border-left-color:#3fb950}
+.toast.err{border-left-color:#f85149}
+.toast.run{border-left-color:#58a6ff}
+.toast.info{border-left-color:#8b949e}
+.toast .tx{flex:1;word-break:break-all}
+.toast .cls{background:none;border:none;color:#8b949e;cursor:pointer;font-size:14px;line-height:1;padding:0}
+@keyframes tin{from{opacity:0;transform:translateX(14px)}to{opacity:1;transform:none}}
+.overlay.ask{z-index:150}
+.dialog.askd{max-width:520px}
+.dialog .askbody{font-size:13px;color:#c9d1d9;line-height:1.75;white-space:pre-wrap;word-break:break-all;margin-bottom:16px}
+.askbtns{display:flex;gap:8px;justify-content:flex-end}
 </style>
 </head>
 <body>
@@ -3288,9 +3803,11 @@ input[type=checkbox]{accent-color:#1f6feb}
   <h1>📦 入库任务监控</h1>
   <span class="tag" id="lastUpdate">-</span>
   <div class="spacer"></div>
-  <label class="autoflag"><input type="checkbox" id="auto" checked> 自动刷新 5s</label>
-  <button class="btn ghost" onclick="load()">🔄 刷新</button>
-  <a href="/">← 一键入库</a>
+  <div class="nav">
+    <a class="btn sm" href="/">🚀 一键入库</a>
+    <a class="btn sm cur" href="/tasks">📋 任务监控</a>
+    <a class="btn sm avdb" href="/avdb">🔗 avdb 连接器</a>
+  </div>
 </div>
 <div class="container">
   <div class="cards" id="cards"></div>
@@ -3302,17 +3819,57 @@ input[type=checkbox]{accent-color:#1f6feb}
       <span class="tab" data-s="done">已完成</span>
       <span class="tab" data-s="failed">失败</span>
     </div>
-    <input type="text" id="q" placeholder="搜索 thread / 标题 / task_id...">
-    <button class="btn" onclick="searchNow()">搜索</button>
+    <div class="tabs" id="tabsOrigin">
+      <span class="tab active" data-o="">全部来源</span>
+      <span class="tab" data-o="sehuatang">色花堂</span>
+      <span class="tab" data-o="avdb">🔗 avdb</span>
+    </div>
+    <div class="tools">
+      <label class="autoflag"><input type="checkbox" id="auto" checked> 自动刷新 5s</label>
+      <button class="btn ghost" onclick="load(true)">🔄 刷新</button>
+    </div>
   </div>
+  <div class="bar2">
+    <select class="sel" id="catSel"><option value="">全部分类</option></select>
+    <input type="text" id="q" placeholder="搜索 thread / 标题 / task_id..." style="flex:1;min-width:220px;padding:8px 14px;background:#161b22;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;outline:none">
+    <button class="btn primary" onclick="searchNow()">搜索</button>
+    <button class="btn ghost" id="btnExport" onclick="exportCsv()">⬇ 导出 CSV</button>
+    <button class="btn danger" id="btnRetryAll" style="display:none" onclick="retryAll()"></button>
+    <div class="spacer"></div>
+    <label class="autoflag">每页
+      <select class="sel" id="perPage">
+        <option value="50">50</option><option value="100">100</option><option value="200">200</option>
+      </select>
+    </label>
+  </div>
+  <div class="tw">
   <table>
     <thead>
-      <tr><th>创建时间</th><th>Thread</th><th>标题</th><th>类型</th><th>状态</th><th>进度</th><th>当前消息</th><th></th></tr>
+      <tr><th class="sortable" data-sort="created_at">创建时间<span class="ar"></span></th><th class="sortable" data-sort="thread_id">Thread<span class="ar"></span></th><th class="sortable" data-sort="title">标题<span class="ar"></span></th><th>类型</th><th>来源</th><th class="sortable" data-sort="category">分类<span class="ar"></span></th><th class="sortable" data-sort="status">状态<span class="ar"></span></th><th class="sortable" data-sort="progress">进度<span class="ar"></span></th><th>当前消息</th><th></th></tr>
     </thead>
     <tbody id="tbody"></tbody>
   </table>
-  <div class="empty" id="empty" style="display:none">暂无任务记录</div>
+  </div>
+  <div class="empty" id="empty" style="display:none">
+    <div id="emptyText">暂无任务记录</div>
+    <div class="eacts">
+      <button class="btn ghost sm" onclick="clearFilters()">清除筛选</button>
+      <a class="btn primary sm" href="/">🚀 去首页提交</a>
+    </div>
+  </div>
   <div class="pager" id="pager"></div>
+</div>
+<div class="toasts" id="toasts"></div>
+
+<div class="overlay ask" id="askOverlay">
+  <div class="dialog askd">
+    <h2 id="askTitle">确认操作</h2>
+    <div class="askbody" id="askBody"></div>
+    <div class="askbtns">
+      <button class="btn ghost" id="askCancel">取消</button>
+      <button class="btn primary" id="askOk">确定</button>
+    </div>
+  </div>
 </div>
 
 <div class="overlay" id="overlay" onclick="if(event.target===this)closeDetail()">
@@ -3361,90 +3918,383 @@ input[type=checkbox]{accent-color:#1f6feb}
 const STATUS = {queued:'排队', running:'运行中', pending_manual:'待整理', done:'已完成', failed:'失败'};
 const KIND_LBL = {fanhao:'影片', non_fanhao:'剧集', metadata:'📤元数据'};
 function kindLbl(k){return KIND_LBL[k] || (k ? esc(k) : '-');}
+const ORIGIN_LBL = {'':'🀄 色花堂', 'avdb':'🔗 avdb'};
+function originLbl(o){return ORIGIN_LBL[o||''] || esc(o);}
 const STEP_PCT = {init:5, push:15, wait:40, scrape:60, nfo:80, strm:80, scan:92};
 const STEP_LBL = {init:'创建', push:'推送', wait:'等待落地', wait_video:'等待落地', scrape:'刮削', nfo:'元数据', strm:'生成strm', scan:'扫库', move:'移动', error:'异常'};
-let curStatus = '', curPage = 1, curTask = null;
+let curStatus = '', curOrigin = '', curCategory = '', curPage = 1, curTask = null;
+let sortKey = 'created_at', sortDir = 'desc';
+let lastSig = '', lastKey = '', lastStats = '';
+let perPage = (function(){ const v = parseInt(localStorage.getItem('tasksPerPage')||'50', 10); return [50,100,200].indexOf(v)>=0 ? v : 50; })();
+const rowMap = new Map();          // task_id -> {tr, cache:{cell:html}}
+const expanded = new Set();        // 消息列就地展开状态
+const CATS = __CATS_JSON__;
+const CAT_LBL = {}; CATS.forEach(c=>{ CAT_LBL[c.key] = c.name; });
+const CELLS = ['time','tid','title','kind','origin','cat','status','prog','msg','act'];
 
 function esc(s){return (s==null?'':String(s)).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function isPendingMeta(t){
+  // done 但没走到 scan: 只有「MDC 未刮削完整, 等油猴补元数据」这一种终态
+  // (import_api.py 兜底分支 save_task(status='done', step='nfo'); to_tv 分支为 step='strm')
+  // 2026-09-20 修复: 此前 pct() 对 done 一律返回 100%, 面板显示「已完成/100%」却写「请补充元数据」
+  // 2026-09-20 追加: t.superseded = 同一帖已有更新的成功任务 (行内「🔁 重刮」跑完) → 不再算待补
+  return t.status==='done' && t.step!=='scan' && !t.superseded;
+}
 function pct(t){
-  if(t.status==='done') return {p:100, cls:'done'};
+  if(t.status==='done') return isPendingMeta(t) ? {p: (STEP_PCT[t.step]||80), cls:'pending'} : {p:100, cls:'done'};
   if(t.status==='failed') return {p:100, cls:'failed'};
   const p = STEP_PCT[t.step] || (t.status==='queued'?5:50);
   return {p, cls:''};
 }
+function statusCell(t){
+  if(isPendingMeta(t)) return '<span class="badge pending_manual" title="MDC 刮削不完整: 请到帖子页用油猴脚本补充元数据">待补元数据</span>';
+  if(t.status==='done' && t.step!=='scan') return '<span class="badge done" title="该帖此后已有新的成功任务 (已重刮), 旧记录不再计入待补">已完成</span>';
+  return badge(t.status);
+}
 function fmt(s){return s?String(s).slice(0,19).replace('T',' '):'';}
 function badge(st){return '<span class="badge '+esc(st)+'">'+(STATUS[st]||esc(st))+'</span>';}
-
-function renderCards(stats){
-  const c = [
-    ['total','总数',stats.total],['queued','排队',stats.queued],
-    ['running','运行中',stats.running],['pending_manual','待整理',stats.pending_manual||0],
-    ['done','已完成',stats.done],['failed','失败',stats.failed]
-  ];
-  document.getElementById('cards').innerHTML = c.map(x=>'<div class="card '+x[0]+'"><div class="lbl">'+x[1]+'</div><div class="num">'+x[2]+'</div></div>').join('');
+function rel(s){
+  if(!s) return '-';
+  const t = Date.parse(String(s).replace(' ','T'));
+  if(isNaN(t)) return esc(s);
+  const d = Math.floor((Date.now()-t)/1000);
+  if(d < 0) return '刚刚';
+  if(d < 60) return d+' 秒前';
+  if(d < 3600) return Math.floor(d/60)+' 分钟前';
+  if(d < 86400) return Math.floor(d/3600)+' 小时前';
+  if(d < 172800) return '昨天';
+  if(d < 2592000) return Math.floor(d/86400)+' 天前';
+  return esc(String(s).slice(5,16).replace('T',' '));
+}
+function catBadge(c){
+  const k = (c||'').trim();
+  if(!k) return '<span class="catbadge c-none">-</span>';
+  const cls = CAT_LBL[k] ? ('c-'+k) : 'c-none';
+  return '<span class="catbadge '+cls+'" data-cat="'+esc(k)+'" style="cursor:pointer" title="点击按「'+esc(CAT_LBL[k]||k)+'」筛选">'+esc(CAT_LBL[k]||k)+'</span>';
+}
+function toast(msg, type, ms){
+  const box = document.getElementById('toasts');
+  const el = document.createElement('div');
+  el.className = 'toast '+(type||'info');
+  el.innerHTML = '<div class="tx">'+esc(msg)+'</div><button class="cls" title="关闭">✕</button>';
+  el.querySelector('.cls').onclick = ()=>el.remove();
+  box.appendChild(el);
+  const life = ms || (type==='err' ? 7000 : 3800);
+  setTimeout(()=>{ el.style.transition='opacity .3s'; el.style.opacity='0'; setTimeout(()=>el.remove(), 320); }, life);
+  return el;
+}
+function ask(title, body, okLabel, danger){
+  return new Promise(res=>{
+    const ov = document.getElementById('askOverlay');
+    document.getElementById('askTitle').textContent = title || '确认操作';
+    document.getElementById('askBody').textContent = body || '';
+    const ok = document.getElementById('askOk'), cancel = document.getElementById('askCancel');
+    ok.textContent = okLabel || '确定';
+    ok.className = 'btn ' + (danger ? 'danger' : 'primary');
+    const done = v => { ov.classList.remove('show'); ok.onclick=null; cancel.onclick=null; document.removeEventListener('keydown', key); res(v); };
+    const key = e => { if(e.key==='Escape') done(false); };
+    ok.onclick = ()=>done(true); cancel.onclick = ()=>done(false);
+    document.addEventListener('keydown', key);
+    ov.classList.add('show');
+    ov.onclick = e => { if(e.target===ov) done(false); };
+  });
+}
+function clearFilters(){
+  curStatus=''; curOrigin=''; curCategory=''; curPage=1;
+  document.querySelectorAll('#tabs .tab').forEach(x=>x.classList.toggle('active', !x.dataset.s));
+  document.querySelectorAll('#tabsOrigin .tab').forEach(x=>x.classList.toggle('active', !x.dataset.o));
+  document.getElementById('catSel').value = '';
+  document.getElementById('q').value = '';
+  load(true);
 }
 
+function cardCls(f){
+  if(!f) return curStatus==='' && !curOrigin && !curCategory;
+  if(f.startsWith('s:')) return curStatus === f.slice(2);
+  if(f.startsWith('o:')) return curOrigin === f.slice(2);
+  return false;
+}
+function renderCards(stats){
+  const c = [
+    ['total','总数',stats.total,''],
+    ['queued','排队',stats.queued,'s:queued'],
+    ['running','运行中',stats.running,'s:running'],
+    ['pending_manual','待整理',stats.pending_manual||0,'s:pending_manual'],
+    ['done','已完成',stats.done,'s:done'],
+    ['pendingmd','⚠ 待补元数据',stats.pending_md||0,'s:pendingmd'],
+    ['failed','失败',stats.failed,'s:failed'],
+    ['avdbsrc','🔗 avdb 来源',stats.avdb||0,'o:avdb']
+  ];
+  document.getElementById('cards').innerHTML = c.map(x=>{
+    const on = cardCls(x[3]);
+    return '<div class="card '+x[0]+(on?' on':'')+'" data-f="'+x[3]+'" tabindex="0" title="'+
+      (x[3] ? '点击筛选：'+x[1] : '点击清除筛选')+'"><div class="lbl">'+x[1]+'</div><div class="num">'+x[2]+'</div></div>';
+  }).join('');
+  const ra = document.getElementById('btnRetryAll');
+  const n = stats.failed_push || 0;
+  if(n > 0){ ra.style.display=''; ra.textContent = '🔁 重试全部推送失败 ('+n+')'; }
+  else { ra.style.display='none'; }
+}
+function applyCardFilter(f){
+  if(!f){
+    curStatus=''; curOrigin=''; curCategory='';
+    document.getElementById('catSel').value=''; document.getElementById('q').value='';
+  }
+  else if(f.startsWith('s:')){ curStatus = f.slice(2); }
+  else if(f.startsWith('o:')){ curOrigin = f.slice(2); }
+  document.querySelectorAll('#tabs .tab').forEach(x=>x.classList.toggle('active', (x.dataset.s||'')===curStatus));
+  document.querySelectorAll('#tabsOrigin .tab').forEach(x=>x.classList.toggle('active', (x.dataset.o||'')===curOrigin));
+  curPage = 1; load(true);
+}
+
+function msgCell(t){
+  const full = (t.msg||'').replace(/\n/g,' ').trim();
+  if(full.length <= 80) return '<div class="msgcell" title="'+esc(full)+'">'+esc(full||'-')+'</div>';
+  const open = expanded.has(t.task_id);
+  return '<div class="msg-wrap"><div class="msgcell'+(open?' open':'')+'" title="'+esc(full)+'">'+
+    esc(open ? full : full.slice(0,80)+'…')+'</div>'+
+    '<button class="msg-more" data-more="'+esc(t.task_id)+'">'+(open?'收起':'展开')+'</button></div>';
+}
+function actCell(t){
+  let h = '<button class="btn ghost sm" data-act="detail" data-id="'+esc(t.task_id)+'">详情</button>';
+  if(t.kind==='non_fanhao' && t.thread_id) h += '<button class="btn ok sm" style="margin-left:6px" data-act="tv" data-id="'+esc(t.task_id)+'" data-tid="'+esc(t.thread_id)+'">🔄整理</button>';
+  if(t.status==='failed' && t.step==='push') h += '<button class="btn danger sm" style="margin-left:6px" data-act="repush" data-id="'+esc(t.task_id)+'">重推115</button>';
+  if(t.status==='failed' && t.step==='wait_video') h += '<button class="btn primary sm" style="margin-left:6px" data-act="cvideo" data-id="'+esc(t.task_id)+'">✅继续</button>';
+  // 待补元数据: 一键重刮 (走 MDCng watcher, 重触发文件名现为纯字母后缀, 不会污染番号) 2026-09-20
+  // 仅在 thread_id 为真实色花堂帖子号时提供; avdb 来源的 thread_id 是番号, 无目录可重刮
+  if(isPendingMeta(t) && /^\d+$/.test(String(t.thread_id||''))) h += '<button class="btn warn sm" style="margin-left:6px" title="以 MDCng 重新刮削 thread_'+esc(t.thread_id)+' (创建新任务)" data-act="rescrape" data-id="'+esc(t.task_id)+'" data-tid="'+esc(t.thread_id)+'">🔁 重刮</button>';
+  return h;
+}
+function rowCells(t){
+  const p = pct(t);
+  return {
+    time: '<span title="'+esc(fmt(t.created_at))+'">'+esc(rel(t.created_at))+'</span>',
+    tid: '<div class="tid" title="'+esc(t.thread_id||'')+'">'+(t.thread_url ? '<a href="'+esc(t.thread_url)+'" target="_blank" style="color:#58a6ff;text-decoration:none" title="打开原帖">'+esc(t.thread_id||'-')+' ↗</a>' : esc(t.thread_id||'-'))+'</div>',
+    title: '<div class="t" title="'+esc(t.title||'')+'">'+esc(t.title||'-')+'</div>',
+    kind: kindLbl(t.kind),
+    origin: (t.origin==='avdb' ? '<span class="badge" style="background:#3d2e00;color:#d29922">🔗 avdb</span>' : '<span class="badge" style="background:#21262d;color:#8b949e">🀄 色花堂</span>'),
+    cat: catBadge(t.category),
+    status: statusCell(t),
+    prog: '<div style="display:flex;align-items:center;gap:6px"><div class="progress"><div class="fill '+p.cls+'" style="width:'+p.p+'%"></div></div><span class="pct">'+p.p+'%</span></div>',
+    msg: msgCell(t),
+    act: actCell(t)
+  };
+}
+const NOWRAP = {time:1, kind:1, origin:1, cat:1, status:1, prog:1, act:1};
+function rowClsOf(t){ return t.status==='failed' ? 'row-failed' : (t.status==='done' ? 'row-done' : ''); }
+function rowHTML(t){
+  const c = rowCells(t);
+  const cls = rowClsOf(t);
+  return '<tr data-id="'+esc(t.task_id)+'"'+(cls?' class="'+cls+'"':'')+'>' +
+    CELLS.map(k=>'<td data-c="'+k+'"'+(NOWRAP[k]?' style="white-space:nowrap"':'')+'>'+c[k]+'</td>').join('') + '</tr>';
+}
 function renderRows(tasks){
   const tb = document.getElementById('tbody');
   if(!tasks.length){
-    tb.innerHTML='';
+    tb.innerHTML=''; rowMap.clear(); lastKey='';
+    const filtered = curStatus || curOrigin || curCategory || document.getElementById('q').value.trim();
+    document.getElementById('emptyText').textContent = filtered ? '当前筛选条件下没有任务' : '暂无任务记录';
     document.getElementById('empty').style.display='block';
     document.getElementById('pager').innerHTML='';
     return;
   }
   document.getElementById('empty').style.display='none';
-  tb.innerHTML = tasks.map(t=>{
-    const p = pct(t);
-    const msg = (t.msg||'').replace(/\n/g,' ').slice(0,80);
-    return '<tr>'+
-      '<td style="white-space:nowrap">'+fmt(t.created_at)+'</td>'+
-      '<td style="white-space:nowrap">'+(t.thread_url ? '<a href="'+esc(t.thread_url)+'" target="_blank" style="color:#58a6ff;text-decoration:none" title="打开原帖">'+esc(t.thread_id||'-')+' ↗</a>' : esc(t.thread_id||'-'))+'</td>'+
-      '<td><div class="t" title="'+esc(t.title||'')+'">'+esc(t.title||'-')+'</div></td>'+
-      '<td style="white-space:nowrap">'+kindLbl(t.kind)+'</td>'+
-      '<td>'+badge(t.status)+'</td>'+
-      '<td style="white-space:nowrap"><div style="display:flex;align-items:center;gap:6px"><div class="progress"><div class="fill '+p.cls+'" style="width:'+p.p+'%"></div></div><span class="pct">'+p.p+'%</span></div></td>'+
-      '<td><div class="msg" title="'+esc(t.msg||'')+'">'+esc(msg||'-')+'</div></td>'+
-      '<td style="white-space:nowrap"><button class="btn ghost" style="padding:4px 10px;font-size:12px" onclick="detail(\''+esc(t.task_id)+'\')">详情</button>'+
-      (t.kind==='non_fanhao' && t.thread_id ? '<button class="btn ghost" style="padding:4px 10px;font-size:12px;margin-left:6px;color:#3fb950;border-color:#2ea043" onclick="tvRefreshQuick(\''+esc(t.task_id)+'\',\''+esc(t.thread_id)+'\')">🔄整理</button>' : '')+
-      (t.status==='failed' && t.step==='push' ? '<button class="btn ghost repush" style="padding:4px 10px;font-size:12px;margin-left:6px" onclick="repush(\''+esc(t.task_id)+'\')">重推115</button>' : '')+
-      (t.status==='failed' && t.step==='wait_video' ? '<button class="btn ghost rs-confirm" style="padding:4px 10px;font-size:12px;margin-left:6px" onclick="confirmVideo(\''+esc(t.task_id)+'\')">✅继续</button>' : '')+
-      '</td>'+
-    '</tr>';
-  }).join('');
+  const key = tasks.map(t=>t.task_id).join(',');
+  if(key !== lastKey){
+    tb.innerHTML = tasks.map(rowHTML).join('');
+    rowMap.clear();
+    Array.prototype.forEach.call(tb.children, tr=>{
+      const cache = {};
+      CELLS.forEach(c=>{ const td = tr.querySelector('[data-c="'+c+'"]'); cache[c] = td ? td.innerHTML : null; });
+      const src = tasks.filter(t=>t.task_id===tr.dataset.id)[0] || {};
+      rowMap.set(tr.dataset.id, {tr: tr, cache: cache, data: src});
+    });
+    lastKey = key;
+    return;
+  }
+  tasks.forEach(t=>{
+    const rec = rowMap.get(t.task_id); if(!rec) return;
+    rec.data = t;
+    const cells = rowCells(t);
+    CELLS.forEach(c=>{
+      if(cells[c] !== rec.cache[c]){
+        const td = rec.tr.querySelector('[data-c="'+c+'"]');
+        if(td){ td.innerHTML = cells[c]; rec.cache[c] = cells[c]; }
+      }
+    });
+    const cls = rowClsOf(t);
+    if((rec.tr.className||'') !== cls) rec.tr.className = cls;
+  });
+}
+function toggleMsg(id){
+  const rec = rowMap.get(id); if(!rec) return;
+  if(expanded.has(id)) expanded.delete(id); else expanded.add(id);
+  const html = msgCell(rec.data || {task_id: id});
+  const td = rec.tr.querySelector('[data-c="msg"]');
+  if(td){ td.innerHTML = html; rec.cache.msg = html; }
 }
 
 function renderPager(info){
   const el = document.getElementById('pager');
   if(!info || info.total_pages<=1){el.innerHTML='';return;}
-  el.innerHTML = '<button class="btn ghost" '+(info.page<=1?'disabled':'')+' onclick="goPage('+(info.page-1)+')">‹ 上一页</button>'+
+  el.innerHTML = '<button class="btn ghost sm" '+(info.page<=1?'disabled':'')+' onclick="goPage('+(info.page-1)+')">‹ 上一页</button>'+
     '<span>第 '+info.page+' / '+info.total_pages+' 页 · 共 '+info.total+' 条</span>'+
-    '<button class="btn ghost" '+(info.page>=info.total_pages?'disabled':'')+' onclick="goPage('+(info.page+1)+')">下一页 ›</button>';
+    '<button class="btn ghost sm" '+(info.page>=info.total_pages?'disabled':'')+' onclick="goPage('+(info.page+1)+')">下一页 ›</button>';
 }
 
-function load(){
+function listUrl(extra){
+  let url = '/api/import/list?page='+curPage+'&per_page='+perPage+'&sort='+sortKey+'&order='+sortDir;
+  if(curStatus==='pendingmd') url += '&pending_md=1';
+  else if(curStatus) url += '&status='+curStatus;
+  if(curOrigin) url += '&origin='+curOrigin;
+  if(curCategory) url += '&category='+encodeURIComponent(curCategory);
   const q = document.getElementById('q').value.trim();
-  let url = '/api/import/list?page='+curPage+'&per_page=50';
-  if(curStatus) url += '&status='+curStatus;
   if(q) url += '&q='+encodeURIComponent(q);
+  return url + (extra||'');
+}
+function setUpdate(txt){ document.getElementById('lastUpdate').textContent = txt; }
+function load(force){
+  const scope = listUrl('');
+  let url = scope;
+  if(!force && sigScope === scope && sigToken) url += '&sig='+encodeURIComponent(sigToken);
   fetch(url).then(r=>r.json()).then(d=>{
-    if(d.error){return;}
+    if(d.error){ return; }
+    const now = new Date().toLocaleTimeString();
+    if(d.sig) sigToken = d.sig;
+    sigScope = scope;
+    if(d.unchanged){ setUpdate('无变化 · ' + now); return; }
     renderCards(d.stats||{});
     renderRows(d.tasks||[]);
     renderPager(d);
-    document.getElementById('lastUpdate').textContent = '更新于 ' + new Date().toLocaleTimeString();
-  }).catch(()=>{});
+    setUpdate('更新于 ' + now);
+  }).catch(()=>{ setUpdate('连接失败 · ' + new Date().toLocaleTimeString()); });
 }
-
-function searchNow(){curPage=1;load();}
-function goPage(p){curPage=p;load();}
+function searchNow(){ curPage=1; load(true); }
+function goPage(p){ curPage=p; load(true); }
+function csvCell(v){ return '"'+String(v==null?'':v).replace(/"/g,'""')+'"'; }
+function exportCsv(){
+  const tip = toast('正在生成 CSV…', 'info', 60000);
+  const url = listUrl('').replace(/per_page=\d+/, 'per_page=5000');   // 导出当前筛选下的全部记录
+  fetch(url).then(r=>r.json()).then(d=>{
+    if(tip) tip.remove();
+    if(d.error){ toast('导出失败: '+d.error, 'err'); return; }
+    const head = ['task_id','创建时间','thread_id','标题','类型','来源','分类','状态','步骤','进度%','消息','原帖'];
+    const rows = [head.map(csvCell).join(',')];
+    (d.tasks||[]).forEach(t=>{
+      rows.push([t.task_id, fmt(t.created_at), t.thread_id||'', t.title||'', kindLbl(t.kind),
+        (t.origin || 'sehuatang'), (CAT_LBL[t.category] || t.category || ''),
+        (isPendingMeta(t) ? '待补元数据' : (STATUS[t.status] || t.status || '')), (STEP_LBL[t.step] || t.step || ''), pct(t).p,
+        (t.msg||'').replace(/\n/g,' '), t.thread_url||''].map(csvCell).join(','));
+    });
+    const blob = new Blob(['\ufeff'+rows.join('\r\n')], {type:'text/csv;charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'import_tasks_' + new Date().toISOString().slice(0,19).replace(/[:T]/g,'-') + '.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
+    toast('已导出 '+(d.tasks||[]).length+' 条记录', 'ok');
+  }).catch(e=>{ if(tip) tip.remove(); toast('导出失败: '+e, 'err'); });
+}
+function retryAll(){
+  fetch('/api/import/list?status=failed&step=push&per_page=5000').then(r=>r.json()).then(d=>{
+    const list = d.tasks || [];
+    if(!list.length){ toast('没有可重试的「推送 115 失败」任务', 'info'); return; }
+    ask('重试全部推送失败', '共 '+list.length+' 个任务将重新推送到 115（复用原任务断点重续）。\n\n后台逐个创建重推任务，确认继续？', '开始重试 ('+list.length+')', true).then(ok=>{
+      if(!ok) return;
+      toast('开始重试 '+list.length+' 个失败任务…', 'run', 6000);
+      let done = 0, bad = 0;
+      const step = i => {
+        if(i >= list.length){
+          toast('重试完成：成功 '+done+' 个' + (bad ? '，失败 '+bad+' 个' : ''), bad ? 'err' : 'ok', 8000);
+          curPage = 1; load(true);
+          return;
+        }
+        fetch('/api/import/resume', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({task_id: list[i].task_id})})
+          .then(r=>r.json()).then(j=>{ if(j.error) bad++; else done++; })
+          .catch(()=>{ bad++; })
+          .then(()=>setTimeout(()=>step(i+1), 250));
+      };
+      step(0);
+    });
+  }).catch(e=>toast('查询失败: '+e, 'err'));
+}
 
 document.getElementById('tabs').addEventListener('click', e=>{
   const t = e.target.closest('.tab'); if(!t) return;
-  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
-  t.classList.add('active');
-  curStatus = t.dataset.s || ''; curPage = 1; load();
+  const v = t.dataset.s || '';
+  curStatus = (curStatus === v) ? '' : v;      // 再点一次 = 取消该筛选
+  document.querySelectorAll('#tabs .tab').forEach(x=>x.classList.toggle('active', (x.dataset.s||'')===curStatus));
+  curPage = 1; load(true);
+});
+document.getElementById('tabsOrigin').addEventListener('click', e=>{
+  const t = e.target.closest('.tab'); if(!t) return;
+  const v = t.dataset.o || '';
+  curOrigin = (curOrigin === v) ? '' : v;
+  document.querySelectorAll('#tabsOrigin .tab').forEach(x=>x.classList.toggle('active', (x.dataset.o||'')===curOrigin));
+  curPage = 1; load(true);
 });
 document.getElementById('q').addEventListener('keydown', e=>{if(e.key==='Enter')searchNow();});
+// 统计卡 = 快捷筛选器 (A 组)
+document.getElementById('cards').addEventListener('click', e=>{
+  const c = e.target.closest('.card'); if(!c) return;
+  applyCardFilter(c.dataset.f || '');
+});
+document.getElementById('cards').addEventListener('keydown', e=>{
+  if(e.key!=='Enter' && e.key!==' ') return;
+  const c = e.target.closest('.card'); if(!c) return;
+  e.preventDefault(); applyCardFilter(c.dataset.f || '');
+});
+// 行内按钮 / 分类徽章 / 消息展开 (A+C 组, 事件委托替代内联 onclick)
+document.getElementById('tbody').addEventListener('click', e=>{
+  const more = e.target.closest('[data-more]');
+  if(more){ toggleMsg(more.dataset.more); return; }
+  const cb = e.target.closest('.catbadge[data-cat]');
+  if(cb && cb.dataset.cat){
+    curCategory = cb.dataset.cat; curPage = 1;
+    document.getElementById('catSel').value = curCategory;
+    load(true); return;
+  }
+  const b = e.target.closest('button[data-act]');
+  if(!b) return;
+  const id = b.dataset.id, act = b.dataset.act;
+  if(act==='detail') detail(id);
+  else if(act==='tv') tvRefreshQuick(id, b.dataset.tid);
+  else if(act==='repush') repush(id);
+  else if(act==='cvideo') confirmVideo(id);
+  else if(act==='rescrape') rescrapeRow(b.dataset.tid, id);
+});
+// 分类筛选 / 每页条数 / 表头排序 (C 组)
+(function(){
+  const sel = document.getElementById('catSel');
+  sel.innerHTML = '<option value="">全部分类</option>' + CATS.map(c=>'<option value="'+esc(c.key)+'">'+esc(c.name)+'</option>').join('');
+  sel.addEventListener('change', e=>{ curCategory = e.target.value; curPage = 1; load(true); });
+})();
+(function(){
+  const pp = document.getElementById('perPage');
+  pp.value = String(perPage);
+  pp.addEventListener('change', e=>{
+    perPage = parseInt(e.target.value, 10) || 50;
+    localStorage.setItem('tasksPerPage', String(perPage));
+    curPage = 1; load(true);
+  });
+})();
+document.querySelectorAll('th.sortable').forEach(th=>{
+  th.addEventListener('click', ()=>{
+    const k = th.dataset.sort;
+    if(sortKey === k) sortDir = (sortDir === 'desc' ? 'asc' : 'desc');
+    else { sortKey = k; sortDir = 'desc'; }
+    updateSortArrows();
+    curPage = 1; load(true);
+  });
+});
+function updateSortArrows(){
+  document.querySelectorAll('th.sortable').forEach(x=>{
+    const ar = x.querySelector('.ar');
+    ar.textContent = (x.dataset.sort === sortKey) ? (sortDir === 'desc' ? '▼' : '▲') : '';
+  });
+}
+updateSortArrows();
 
 function detail(taskId){
   Promise.all([
@@ -3453,11 +4303,12 @@ function detail(taskId){
   ]).then(([h, st])=>{
     const hist = (h && h.history) || [];
     const st2 = (st && !st.error) ? st : {};
-    curTask = {task_id: taskId, thread_id: st2.thread_id || '', title: st2.title || '', status: st2.status || '', step: st2.step || '', kind: st2.kind || ''};
+    curTask = {task_id: taskId, thread_id: st2.thread_id || '', title: st2.title || '', status: st2.status || '', step: st2.step || '', kind: st2.kind || '', category: st2.category || ''};
     document.getElementById('dTitle').textContent = '任务详情 · ' + taskId;
     document.getElementById('dMeta').innerHTML =
       '<b>task_id:</b> '+esc(taskId)+'<br>'+
       '<b>类型:</b> '+kindLbl(st2.kind)+'<br>'+
+      '<b>分类:</b> '+catBadge(st2.category)+'<br>'+
       '<b>thread_id:</b> '+esc(curTask.thread_id||'')+'<br>'+
       '<b>标题:</b> '+esc(curTask.title||'-')+'<br>'+
       (st2.thread_url ? '<b>原帖:</b> <a href="'+esc(st2.thread_url)+'" target="_blank" style="color:#58a6ff">打开帖子 ↗</a><br>' : '')+
@@ -3493,38 +4344,49 @@ function detail(taskId){
 function closeDetail(){curTask=null;document.getElementById('overlay').classList.remove('show');}
 function confirmVideo(taskId){
   if(!taskId) return;
-  if(!confirm('你已确认 115 网盘中该帖视频已下载完成？\n\n将跳过推送/等待，直接从文件处理/刮削/strm 继续。')) return;
-  fetch('/api/import/confirm_video', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({task_id: taskId})
-  }).then(r=>r.json()).then(d=>{
-    if(d.error){alert('提交失败: '+d.error);return;}
-    alert('已确认，任务继续处理: '+d.task_id);
-    closeDetail(); curPage=1; load();
-  }).catch(e=>alert('提交失败: '+e));
+  ask('确认视频已下载完成', '你已确认 115 网盘中该帖视频已下载完成？\n\n将跳过推送/等待，直接从文件处理/刮削/strm 继续。', '确认并继续', false).then(ok=>{
+    if(!ok) return;
+    fetch('/api/import/confirm_video', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({task_id: taskId})
+    }).then(r=>r.json()).then(d=>{
+      if(d.error){ toast('提交失败: '+d.error, 'err'); return; }
+      toast('已确认，任务继续处理: '+d.task_id, 'ok');
+      closeDetail(); curPage=1; load(true);
+    }).catch(e=>toast('提交失败: '+e, 'err'));
+  });
 }
 function tvRefresh(){
   if(!curTask || !curTask.thread_id) return;
-  if(!confirm('执行剧集「落地后流程」？\n\nthread_' + curTask.thread_id + '\n' + (curTask.title||'').slice(0,120) + '\n\n请确认已在 115 网盘整理好视频(删除广告/补充新集)。将执行：未命名视频重命名「原名.thread_x.S01E续集号」→ 生成 strm → 移入 Emby 剧集目录并刷新。')) return;
-  fetch('/api/tv/refresh', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({thread_id: curTask.thread_id, title: curTask.title || ''})
-  }).then(r=>r.json()).then(d=>{
-    if(d.error){alert('提交失败: '+d.error);return;}
-    alert('剧集整理任务已创建: '+d.task_id);
-    closeDetail(); curPage=1; load();
-  }).catch(e=>alert('提交失败: '+e));
+  const tid = curTask.thread_id, ttl = (curTask.title||'').slice(0,120);
+  ask('执行剧集「落地后流程」？', 'thread_' + tid + '\n' + ttl +
+    '\n\n请确认已在 115 网盘整理好视频(删除广告/补充新集)。将执行：未命名视频重命名「原名.thread_x.S01E续集号」→ 生成 strm → 移入 Emby 剧集目录并刷新。',
+    '执行整理', false).then(ok=>{
+    if(!ok) return;
+    fetch('/api/tv/refresh', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({thread_id: tid, title: curTask.title || ''})
+    }).then(r=>r.json()).then(d=>{
+      if(d.error){ toast('提交失败: '+d.error, 'err'); return; }
+      toast('剧集整理任务已创建: '+d.task_id, 'ok');
+      closeDetail(); curPage=1; load(true);
+    }).catch(e=>toast('提交失败: '+e, 'err'));
+  });
 }
 function tvRefreshQuick(taskId, threadId){
-  if(!confirm('执行剧集「落地后流程」？\n\nthread_' + threadId + '\n\n请确认已在 115 网盘整理好视频(删除广告/补充新集)。将执行：未命名视频重命名「原名.thread_x.S01E续集号」→ 生成 strm → 移入 Emby 剧集目录并刷新。')) return;
-  fetch('/api/tv/refresh', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({thread_id: threadId})
-  }).then(r=>r.json()).then(d=>{
-    if(d.error){alert('提交失败: '+d.error);return;}
-    alert('剧集整理任务已创建: '+d.task_id);
-    load();
-  }).catch(e=>alert('提交失败: '+e));
+  ask('执行剧集「落地后流程」？', 'thread_' + threadId +
+    '\n\n请确认已在 115 网盘整理好视频(删除广告/补充新集)。将执行：未命名视频重命名「原名.thread_x.S01E续集号」→ 生成 strm → 移入 Emby 剧集目录并刷新。',
+    '执行整理', false).then(ok=>{
+    if(!ok) return;
+    fetch('/api/tv/refresh', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({thread_id: threadId})
+    }).then(r=>r.json()).then(d=>{
+      if(d.error){ toast('提交失败: '+d.error, 'err'); return; }
+      toast('剧集整理任务已创建: '+d.task_id, 'ok');
+      load(true);
+    }).catch(e=>toast('提交失败: '+e, 'err'));
+  });
 }
 function gotoMeta(){
   if(!curTask || !curTask.thread_id) return;
@@ -3532,37 +4394,72 @@ function gotoMeta(){
 }
 function repush(taskId, fromDetail){
   if(!taskId) return;
-  if(!confirm('重新推送该任务到 115？\n\n（复用原任务断点重续；尚未成功推送的链接会重新推送到 115）')) return;
-  fetch('/api/import/resume', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({task_id: taskId})
-  }).then(r=>r.json()).then(d=>{
-    if(d.error){alert('提交失败: '+d.error);return;}
-    alert('已提交重推 115: '+d.task_id);
-    if(fromDetail) closeDetail();
-    curPage=1; load();
-  }).catch(e=>alert('提交失败: '+e));
+  ask('重新推送该任务到 115？', '复用原任务断点重续；尚未成功推送的链接会重新推送到 115。', '重新推送', false).then(ok=>{
+    if(!ok) return;
+    fetch('/api/import/resume', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({task_id: taskId})
+    }).then(r=>r.json()).then(d=>{
+      if(d.error){ toast('提交失败: '+d.error, 'err'); return; }
+      toast('已提交重推 115: '+d.task_id, 'ok');
+      if(fromDetail) closeDetail();
+      curPage=1; load(true);
+    }).catch(e=>toast('提交失败: '+e, 'err'));
+  });
+}
+function rescrapeRow(tid, taskId){
+  if(!tid) return;
+  const rec = rowMap.get(taskId);
+  const row = rec ? rec.data : null;
+  const ttl = (row && row.title && row.title !== ('thread_'+tid)) ? row.title : ('thread_'+tid);
+  ask('对该帖执行「MDC 刮削」重新刮削？', 'thread_' + tid + '\n' + ttl.slice(0, 120) +
+    '\n\n会先清理旧元数据，创建新任务并显示进度。', '开始刮削', false).then(ok=>{
+    if(!ok) return;
+    fetch('/api/import/rescrape', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({thread_id: tid, kind:'mdc'})
+    }).then(r=>r.json()).then(d=>{
+      if(d.error){ toast('提交失败: '+d.error, 'err'); return; }
+      toast('重新刮削任务已创建: '+d.task_id, 'ok');
+      curPage=1; load(true);
+    }).catch(e=>toast('提交失败: '+e, 'err'));
+  });
 }
 function rescrape(kind){
   if(!curTask || !curTask.thread_id) return;
   const way = kind==='mdc' ? 'MDC 刮削' : '网页爬取刮削';
   const ttl = (curTask.title && curTask.title !== ('thread_'+curTask.thread_id)) ? curTask.title : '(无标题)';
-  if(!confirm('对以下资源执行「'+way+'」重新刮削？\n\nthread_' + curTask.thread_id + '\n' + ttl.slice(0, 120) + '\n\n（会先清理旧元数据，创建新任务并显示进度）')) return;
-  fetch('/api/import/rescrape', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({thread_id: curTask.thread_id, kind: kind})
-  }).then(r=>r.json()).then(d=>{
-    if(d.error){alert('提交失败: '+d.error);return;}
-    alert('重新刮削任务已创建: '+d.task_id);
-    closeDetail(); curPage=1; load();
-  }).catch(e=>alert('提交失败: '+e));
+  ask('对以下资源执行「'+way+'」重新刮削？', 'thread_' + curTask.thread_id + '\n' + ttl.slice(0, 120) +
+    '\n\n会先清理旧元数据，创建新任务并显示进度。', '开始刮削', false).then(ok=>{
+    if(!ok) return;
+    fetch('/api/import/rescrape', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({thread_id: curTask.thread_id, kind: kind})
+    }).then(r=>r.json()).then(d=>{
+      if(d.error){ toast('提交失败: '+d.error, 'err'); return; }
+      toast('重新刮削任务已创建: '+d.task_id, 'ok');
+      closeDetail(); curPage=1; load(true);
+    }).catch(e=>toast('提交失败: '+e, 'err'));
+  });
 }
 
 setInterval(()=>{if(document.getElementById('auto').checked)load();}, 5000);
-load();
+// 深链: /tasks?task_id=xxx (avdb 连接器面板跳过来) → 自动筛选并打开详情
+(function(){
+  const tid = new URLSearchParams(location.search).get('task_id');
+  if(tid){ document.getElementById('q').value = tid; if(typeof detail==='function') detail(tid); }
+})();
+load(true);
 </script>
 </body>
 </html>"""
+
+
+def render_tasks_page(category_map=None, default_category=DEFAULT_CATEGORY):
+    """把分类表注入任务页 (单一来源: import_api.CATEGORY_MAP), 与首页 render_index_page 一致"""
+    cats = [{'key': k, 'name': v[2]} for k, v in (category_map or CATEGORY_MAP).items()]
+    return (TASKS_PAGE
+            .replace('__CATS_JSON__', json.dumps(cats, ensure_ascii=False)))
 
 class ImportHTTPServer(ThreadingHTTPServer):
     """2026-09-13: 单线程 HTTPServer → 多线程。
@@ -3628,7 +4525,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
         if path == '/':
-            self._html(HTML_PAGE)
+            self._html(render_index_page(CATEGORY_MAP, DEFAULT_CATEGORY))
             return
         if path == '/health':
             # 云主机无 MySQL (threads 表在 108), 健康检查用本地 SQLite 即可 (2026-08-20)
@@ -3656,6 +4553,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({'task_id': tid, 'thread_id': t.get('thread_id', ''),
                         'title': t.get('title', ''),
                         'kind': t.get('kind', ''),
+                        'category': t.get('category') or DEFAULT_CATEGORY,
                         'thread_url': tu,
                         'status': t['status'], 'step': t.get('step', ''), 'msg': t.get('msg', ''),
                         'created_at': t.get('created_at', ''), 'updated_at': t.get('updated_at', '')})
@@ -3663,32 +4561,85 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/import/list':
             params = self._parse_query()
             status_f = params.get('status', [''])[0]
+            origin_f = params.get('origin', [''])[0].strip()
             q = params.get('q', [''])[0].strip()
             page = max(1, int(params.get('page', ['1'])[0]))
-            per_page = min(100, int(params.get('per_page', ['50'])[0]))
+            per_page = max(1, min(5000, int(params.get('per_page', ['50'])[0])))
+            # 2026-09-20 A/B/C 组: 分类筛选 / 步骤筛选 / 排序 / 无变化短路由
+            cat_f = params.get('category', [''])[0].strip()
+            step_f = params.get('step', [''])[0].strip()
+            sort_f = params.get('sort', ['created_at'])[0].strip()
+            order_f = params.get('order', ['desc'])[0].strip().lower()
+            sig_in = params.get('sig', [''])[0].strip()
+            sort_cols = {'created_at': 'created_at', 'thread_id': 'thread_id',
+                         'title': 'title', 'status': 'status', 'category': 'category'}
+            order_sql = 'ASC' if order_f == 'asc' else 'DESC'
+            if sort_f == 'progress':
+                prog_case = ("CASE WHEN status='done' THEN 100 WHEN status='failed' THEN 100 "
+                             "WHEN step='init' THEN 5 WHEN step='push' THEN 15 "
+                             "WHEN step IN ('wait','wait_video') THEN 40 WHEN step IN ('scrape') THEN 60 "
+                             "WHEN step IN ('nfo','strm') THEN 80 WHEN step='scan' THEN 92 "
+                             "WHEN status='queued' THEN 5 ELSE 50 END")
+                order_by = f'{prog_case} {order_sql}, created_at DESC'
+            else:
+                order_by = f"{sort_cols.get(sort_f, 'created_at')} {order_sql}, created_at DESC"
             conn = sqlite3.connect(LOG_DB)
             try:
                 where, args = [], []
                 if status_f:
                     where.append('status=?'); args.append(status_f)
+                if origin_f == 'avdb':
+                    where.append("origin='avdb'")
+                elif origin_f in ('sehuatang', 'web'):
+                    where.append("(origin IS NULL OR origin<>'avdb')")
                 if q:
                     where.append('(thread_id LIKE ? OR title LIKE ? OR task_id LIKE ?)')
                     args += [f'%{q}%', f'%{q}%', f'%{q}%']
+                if cat_f:
+                    where.append('IFNULL(category, ?)=?'); args += [DEFAULT_CATEGORY, cat_f]
+                if step_f:
+                    where.append('step=?'); args.append(step_f)
+                # 2026-09-20: 「待补元数据」筛选 (done 但未走到 scan = MDC 刮削不完整等油猴补)
+                # 且排除「同一帖已有更新的成功任务」的旧记录 —— 行内「🔁 重刮」重刮成功后,
+                # 旧记录会自动从清单里消失, 不用手工清理 (SNOS-335 实测: 83e40fe980a4 done/scan)
+                if params.get('pending_md', [''])[0].strip() in ('1', 'true'):
+                    where.append(PENDING_MD_SQL)
                 where_sql = (' WHERE ' + ' AND '.join(where)) if where else ''
+                # B 组: 无变化短路由。sig = (全局总条数, 最后更新时间, 该筛选下条数)
+                # 全部基于会在 save_task 时变化的列, 任何任务动一下都会让 sig 变。
+                sig_row = conn.execute('SELECT COUNT(*), IFNULL(MAX(updated_at), "") FROM import_log').fetchone()
+                sig = f'{sig_row[0]}:{sig_row[1]}'
+                if sig_in and sig_in == sig:
+                    self._json({'unchanged': True, 'sig': sig})
+                    return
                 total = conn.execute(f'SELECT COUNT(*) FROM import_log{where_sql}', args).fetchone()[0]
-                rows = conn.execute(f'''SELECT task_id, thread_id, title, magnet, kind, status, step, msg, created_at, updated_at, thread_url
-                                        FROM import_log{where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?''',
+                # category 一并返回 (2026-09-20): 面板显示分类徽章 + 批量页复用同一接口
+                rows = conn.execute(f'''SELECT task_id, thread_id, title, magnet, kind, status, step, msg, created_at, updated_at, thread_url, origin, category,
+                                        EXISTS(SELECT 1 FROM import_log n WHERE n.thread_id=import_log.thread_id AND n.status='done'
+                                               AND n.step='scan' AND n.created_at>import_log.created_at)
+                                        FROM import_log{where_sql} ORDER BY {order_by} LIMIT ? OFFSET ?''',
                                     args + [per_page, (page - 1) * per_page]).fetchall()
-                cols = ['task_id', 'thread_id', 'title', 'magnet', 'kind', 'status', 'step', 'msg', 'created_at', 'updated_at', 'thread_url']
+                cols = ['task_id', 'thread_id', 'title', 'magnet', 'kind', 'status', 'step', 'msg', 'created_at', 'updated_at', 'thread_url', 'origin', 'category', 'superseded']
                 tasks = [dict(zip(cols, r)) for r in rows]
                 # 帖子链接: 入库保存的真实 URL 优先, 无则按色花堂模板兜底 (2026-08-20, 已去 MySQL)
                 for t in tasks:
                     t['thread_url'] = _thread_url_of(t.get('thread_id'), t.get('thread_url') or '')
+                    t['origin'] = t.get('origin') or ''
                 stats = {s: conn.execute('SELECT COUNT(*) FROM import_log WHERE status=?', (s,)).fetchone()[0]
                          for s in ('queued', 'running', 'pending_manual', 'done', 'failed')}
                 stats['total'] = conn.execute('SELECT COUNT(*) FROM import_log').fetchone()[0]
+                stats['avdb'] = conn.execute("SELECT COUNT(*) FROM import_log WHERE origin='avdb'").fetchone()[0]
+                # 2026-09-20: done 但未走到 scan 的 = 「MDC 刮削不完整, 待油猴补元数据」终态
+                # (兜底分支 save_task(status='done', step='nfo')), 面板需与真·完成区分
+                stats['pending_md'] = conn.execute(
+                    f"SELECT COUNT(*) FROM import_log WHERE {PENDING_MD_SQL}").fetchone()[0]
+                stats['sehuatang'] = stats['total'] - stats['avdb']
+                # A 组「重试全部推送失败」用: 可自动重续的失败任务数
+                stats['failed_push'] = conn.execute(
+                    "SELECT COUNT(*) FROM import_log WHERE status='failed' AND step='push'").fetchone()[0]
                 self._json({'total': total, 'page': page, 'per_page': per_page,
                             'total_pages': max(1, (total + per_page - 1) // per_page),
+                            'sort': sort_f, 'order': order_f, 'sig': sig,
                             'stats': stats,
                             'tasks': tasks})
             finally:
@@ -3708,8 +4659,15 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 conn.close()
             return
+        if path == '/avdb':
+            self._html(AVDB_PAGE)
+            return
+        if path == '/api/avdb/status':
+            # avdb 连接器面板数据 (只读本地 sqlite + 台账, 零网络请求)
+            self._json(avdb_status())
+            return
         if path == '/tasks':
-            self._html(TASKS_PAGE)
+            self._html(render_tasks_page())
             return
         if path == '/api/login/qrcode':
             # 发起 115 扫码全局登录(后台线程): 生成二维码 -> 等扫码 -> 换open token -> 全局分发
@@ -3774,6 +4732,113 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({'task_id': tid, 'thread_id': str(thread_id or ''), 'magnet': (magnet or '')[:60], 'category': category})
             else:
                 self._json({'error': '需要 thread_id 或 magnet'}, 400)
+            return
+        if path == '/api/import/batch':
+            # 多磁链批量入库 (2026-09-20): 面板一次提交多条。
+            # body: {"links": "一行一条..." | ["magnet:...", ...], "kind": "fanhao",
+            #        "category": "fc2", "dry_run": false,
+            #        "thread_id": "1234567", "title": "...", "thread_url": "..."}
+            # 行尾可写 "#<分类key>" 单条覆盖 category; dry_run=true 只回解析结果不入队 (供面板预览/自检)。
+            # thread_id/title/thread_url (2026-09-21) 透传给每条任务, 否则落点退化成 manual_<hash8> 且非番号不走剧集模式。
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = json.loads(self.rfile.read(length).decode('utf-8', 'replace')) if length else {}
+            except Exception as e:
+                self._json({'error': 'bad json: ' + str(e)}, 400)
+                return
+            raw = body.get('links')
+            if raw is None:
+                raw = body.get('items') or []
+            res = batch_import(raw, body.get('kind'), body.get('category'),
+                               dry_run=bool(body.get('dry_run')),
+                               thread_id=body.get('thread_id'), title=body.get('title'),
+                               thread_url=body.get('thread_url'))
+            self._json(res, 400 if res.get('error') else 200)
+            return
+        if path == '/api/import/adopt':
+            # avdb 下载 → 一键入库 (2026-09-19): 不重新下载, 把 avdb 已下好(或正在下)的片接进入库管线。
+            # body: {"id": 9} 或 {"number": "MIDV-586"}; 可选 {"category": "av", "dry_run": true}
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = json.loads(self.rfile.read(length).decode('utf-8', 'replace')) if length else {}
+            except Exception as e:
+                self._json({'error': 'bad json: ' + str(e)}, 400)
+                return
+            number = (body.get('number') or '').strip()
+            dl_id = body.get('id') or body.get('dl_id')
+            if not number and not dl_id:
+                self._json({'error': '需要 number 或 id'}, 400)
+                return
+            try:
+                info = adopt_resolve(number=number or None, dl_id=dl_id)
+            except Exception as e:
+                self._json({'error': '解析失败: ' + str(e)[:200]}, 500)
+                return
+            if info.get('error'):
+                self._json(info, 404)
+                return
+            cat = norm_category(body.get('category'))
+            if body.get('dry_run'):
+                # 只解析不动手: 返回落点/目标/当前视频与大小, 供确认
+                try:
+                    vids, total, big = _adopt_scan(Push115(), info['dir_115'])
+                except Exception as e:
+                    log.warning('[adopt] dry_run 列目录失败: %s', str(e)[:120])
+                    vids, total, big = [], 0, []
+                info['dry_run'] = True
+                info['thread_id'] = info['dir_name']
+                # 2026-09-20 起 adopt 不再迁移 115 目录, 落点即 avdb 原路径
+                info['target_115'] = info['dir_115']
+                info['videos'] = [{'name': v[1], 'size': int(v[3] or 0)} for v in vids]
+                info['total_gb'] = round((total or 0) / 2 ** 30, 2)
+                info['big_count'] = len(big)
+                self._json(info)
+                return
+            try:
+                tid = start_adopt(number=number or None, dl_id=dl_id, category=cat)
+            except Exception as e:
+                self._json({'error': str(e)[:300]}, 400)
+                return
+            self._json({'task_id': tid, 'number': info['number'], 'dl_id': info.get('dl_id'),
+                        'src_115': info['dir_115'], 'thread_id': info['dir_name'],
+                        'target_115': info['dir_115'],   # 2026-09-20 起不再迁移, 落点即源
+                        'category': cat, 'status_url': '/api/import/status?task_id=' + tid})
+            return
+        if path == '/api/avdb/scan':
+            # 手动补扫 (2026-09-19): 找 avdb 里没进台账、但 115 上确实有落点的漏网片。
+            # body: {"apply": false} 只预览; {"apply": true} 直接提交入库。会列 115 目录(手动触发才跑)
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = json.loads(self.rfile.read(length).decode('utf-8', 'replace')) if length else {}
+            except Exception:
+                body = {}
+            try:
+                limit = max(1, min(1000, int(body.get('limit') or 40)))
+            except Exception:
+                limit = 40
+            try:
+                self._json(avdb_scan(limit=limit, do_adopt=bool(body.get('apply')),
+                                     category=norm_category(body.get('category'))))
+            except Exception as e:
+                log.exception('[avdb] 补扫失败')
+                self._json({'error': '补扫失败: ' + str(e)[:200]}, 500)
+            return
+        if path == '/api/avdb/pause':
+            # 暂停/恢复 avdb 守护 (用文件标志, 守护每轮检查 /tmp/avdb_watch.pause)
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = json.loads(self.rfile.read(length).decode('utf-8', 'replace')) if length else {}
+            except Exception:
+                body = {}
+            on = bool(body.get('on'))
+            try:
+                if on:
+                    open(AVDB_PAUSE_FILE, 'w').write('paused by panel\n')
+                elif os.path.exists(AVDB_PAUSE_FILE):
+                    os.remove(AVDB_PAUSE_FILE)
+                self._json({'paused': os.path.exists(AVDB_PAUSE_FILE)})
+            except Exception as e:
+                self._json({'error': str(e)[:200]}, 500)
             return
         if path == '/api/import/resume':
             # 断点重续 (2026-08-13): 复用原 task_id 重新入队, run_import 幂等跳过已完成步骤
@@ -4353,7 +5418,7 @@ def _requeue_stale_tasks():
     magnet 传空: 有 thread_id 时走 DB links 表全量磁力, 避免截断磁力漏推。"""
     try:
         c = sqlite3.connect(LOG_DB)
-        rows = c.execute("SELECT task_id, thread_id, magnet, title, kind, step, msg, category FROM import_log "
+        rows = c.execute("SELECT task_id, thread_id, magnet, title, kind, step, msg, category, src_115 FROM import_log "
                          "WHERE status IN ('queued','running') ORDER BY created_at").fetchall()
         c.close()
     except Exception as e:
@@ -4363,8 +5428,20 @@ def _requeue_stale_tasks():
         log.info('[startup] 无未完成任务需恢复')
         return
     POST_STEPS = ('scrape', 'nfo', 'strm', 'scan', 'move', 'rename')
-    for task_id, thread_id, magnet, title, kind, step, msg, category in rows:
+    for task_id, thread_id, magnet, title, kind, step, msg, category, src_115 in rows:
         m = msg or ''
+        # avdb adopt 任务 (2026-09-19): 有 src_115 记录 → 重新走 adopt 流程 (等完成→处理)
+        # 2026-09-20: adopt 不再迁移 115 目录 → 落点恒为 src_115, 重启后统一重走 adopt
+        # (_adopt_wait_ready 会先快速确认下载已完成, 随即转处理队列); 不再用
+        # _find_thread_path 猜目录 —— 那对"还没处理完"的任务会误判成"已迁移"。
+        if src_115 and (step or '').startswith(('adopt', 'wait', 'push', 'init')):
+            save_task(task_id, status='queued', step='adopt_init',
+                      msg='服务重启, adopt 任务重新入队(按 avdb 原落点续跑)',
+                      thread_id=str(thread_id or ''), kind=kind or 'fanhao', category=category, src_115=src_115)
+            _submit_dl(_run_import_adopt, (task_id, str(thread_id or ''), str(thread_id or ''),
+                                           src_115, category, title or '', Push115.link_hash(magnet or '')))
+            log.info('[startup] 重新入队 adopt 任务 %s (src=%s)', task_id, src_115)
+            continue
         # 按任务类型恢复: rescrape/to_tv 走各自流程, 其余走 import (断点续跑)
         if '重新刮削' in m:
             save_task(task_id, status='queued', step='init', msg='服务重启, 重新刮削任务重新入队(处理队列)',
