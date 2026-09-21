@@ -1,0 +1,11 @@
+{
+  "name": "sehuatang-emby-deliverable-tests",
+  "private": true,
+  "description": "jsdom 桩测: 油猴脚本的库存反查/页面上下文逻辑 (断言脚本真的把哪些文本送给了服务端)",
+  "scripts": {
+    "test": "node inventory_context_jsdom_test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^30.1.0"
+  }
+}
