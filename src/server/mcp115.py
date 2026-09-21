@@ -273,6 +273,29 @@ class MCP115:
         return [r for r, n, is_dir, _sz in self.walk(savepath, maxdepth)
                 if not is_dir and os.path.splitext(n)[1].lower() in MEDIA_EXTS]
 
+    # ---------- 全局搜索 (库存反查, 2026-09-21) ----------
+    def search_files(self, keyword, limit=30, offset=0, file_type=None):
+        """115 网盘全盘搜索 (反查番号是否已在库)。
+
+        2026-09-21 实测 (8 个真实番号):
+          - 单次耗时 0.13~0.70s, 平均 0.31s; 10 路并发 3.13s 全成功
+          - 一次调用 = 一次 115 请求 (无前置列目录), 成本低于 delete(≈3)/move(≈3~4)
+          - 搜索是模糊的: 搜 SNOS-400 会返回 SNOS-403 / SNOS-406-U → 调用方必须二次校验番号
+          - 番号必须带横线: 搜 SNOS400 干净返回 0 条 (无横线搜不到)
+          - 纯数字关键词是垃圾场 (搜 400 → 30 条 MDBK-400/MJAD-400) → 番号须带字母前缀
+          - 大小写无关
+        注意:
+          - limit 显式给 30 —— tool schema 默认 100, 白拉 3 倍数据
+          - retry=0 —— 查询失败就是失败, 不要套 _call 默认 retry=2 变成 3 倍流量
+          - file_type=None 时目录也返回 (可用"目录名恰是番号"当在库证据); =4 只返回视频
+        返回原生 dict (search_files 的结果结构未做归一), 调用方自行取字段;
+        失败/掉线返回 None (调用方必须区分 None 与"0 条命中")。
+        """
+        args = {'keyword': keyword, 'limit': limit, 'offset': offset}
+        if file_type:
+            args['file_type'] = file_type
+        return self._call('search_files', args, retry=0)
+
     # ---------- 离线下载 ----------
     @staticmethod
     def link_hash(link):
