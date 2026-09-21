@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         色花堂链接级一键入库(逐条磁力/ed2k) + 元数据补充
 // @namespace    sehuatang-import
-// @version      1.15.0
+// @version      1.15.1
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @source       https://github.com/Anyi-lab/sehuatang-emby-deliverable
-// @description  色花堂链接级一键入库(逐条磁力/ed2k)。每条链接手工选择类型: "番号"=影片(推→等→清小文件→strm→MDC刮削→Emby刷新→预热; MDC失败/不完整由油猴📤补充); "非番号"=剧集(推→等→重命名thread_xxx_S01E01..→SmartStrm生成strm→油猴📤补充元数据→Emby刷新+预热, 即使1个视频也是剧集)。左上角磁力导航面板列出全部链接可点击快速滚动定位。v1.6.3: 修复手机版磁力被 <wbr>/<br> 等空元素拆成多段文本节点导致的漏识别(全文本拼接兜底+iframe兜底); v1.7.0: 新增手动输入磁力/ed2k链接入库对话框(导航面板✏️按钮, 支持多条, 提交到当前thread); v1.8.0: 新增元数据补充——提取帖子标题/简介/图片, 由本机浏览器下载图片后上传服务器生成 Emby 海报与简介 (导航面板📤按钮); v1.8.1: 元数据图片抓取优化——只抓静态图片(jpg/png等, 排除gif/webp/svg/ico), 懒加载取真实地址(data-original/data-src), 像素尺寸过滤(太小的表情/图标/头像不抓, 超高清原图不抓); v1.8.2: 描述同步新流程(去MySQL, 剧集文件名 thread_xxx_S01E01, MDC失败/剧集均待油猴补充元数据); v1.8.3: API_BASE 改 http(未配https), 悬浮面板新增📋一键跳转任务监控页按钮; v1.8.4: 手机版图片识别兼容——Discuz 附件真实地址 file/zoomfile 属性、选择器抓不到时全量图片兜底、iframe 内正文跨框架收集、相对路径补全域名; v1.8.7: 简介提取终极兜底——按"含磁力/ed2k 链接的文本节点"定位正文容器(色花堂正文必含下载链接, 不受模板类名影响), 简介提取失败时面板显示具体原因。 v1.9.0: 图片改为用户手工选择(候选图网格点选, 支持动图gif/webp/avif, 最多9张), 已选支持📌海报/↑↓调序/✕移除, 上传保留原图格式(mime)不再强制jpg, 移动端触控优化。 v1.9.1: 候选图排除小尺寸表情/图标(像素<200或未加载时CSS尺寸<100x80), 恢复表情/笑脸区域跳过。 v1.9.2: 标题清洗——去掉发布者/来源前缀标记(自转/115ED2K等, 保留【Omar盘点】类系列名), 去掉体积/配额后缀【1.87G/25P+18V/1配额】, 去掉尾部分区与论坛后缀(- 综合讨论区 - 98堂[原色花堂])。 v1.9.5: 磁力导航面板每条磁力新增📋复制按钮(复制完整干净链接含&dn), 标签优先显示文件名; v1.9.6: 取消正文磁力链接旁"🎬入库"按钮(避免页面出现两个入库), 改为磁力导航面板每条磁力🚀一键入库(点🚀选类型: 番号/非番号); // ==UserScript==; v1.9.10: 磁力规则参考 JAV-FORUM——支持 32位 base32 磁力hash(原仅40位hex), ed2k 要求文件名非空(空文件名ed2k拒绝); v1.11.0: 新增批量入库(导航面板⚡按钮)——一次提交本页全部(或勾选)磁力/ed2k: 按行类型分组调 /api/import/batch(每组超100条自动分批), 支持👁dry-run预览、提交后并发轮询进度、面板关闭后头部保留进度徽章, 不再逐条点🚀逐条等, 顺带修掉面板/弹层内的磁力文本被 collectLinks 误收进导航列表; v1.11.1: 悬浮导航面板默认落位改到画面左上角(标题栏仍可拖动, 拖走后仅本次会话生效); v1.12.0: 面板头部重排为两行(标题行 + 工具条), 工具条四个按钮带文字均分宽, 标题不再被挤成两行、按钮不再顶出边界; 拖动后的落位用 GM 存储记住(刷新/翻页仍在原地, 越界自动收回画面内), 双击标题行复位到左上角; v1.13.0: 导航面板每条链接显示 115 库存徽章 ✅在库/❓不在库/⚠️未校验 (打开帖子页自动反查一次, 服务端缓存+分片, MCP 掉线一律显示"未校验"绝不当成"不在库"); v1.14.0: 库存反查带上帖子上下文(title/thread_id/contexts) —— 裸磁链(无 &dn=)也能从页面文本抠出番号, 不再一片⚠️; 服务端台账新增"番号→已入库"索引, 番号命中的 0 请求直答(MCP 掉线也答得出); 跨条查重防呆: 同一段文本供出≥2 条磁链(合集帖公共标题)则该番号作废, 宁缺勿错; 响应新增 src 字段说明番号来源, 控制台一行交代"115 请求数 + 番号来源分账" 【v1.14.1】库存反查: 当结果靠页面文本判定(或一条都没抠出番号)时, 控制台额外打印送给服务端的页面文本(由近到远), 用来核对抠出的番号是否为真。 【v1.15.0】批量入库面板每行直接显示库存徽章 ✅在库/❓不在库/⚠️未校验(与左上角面板同一套绘制入口, 打开弹窗时自己补查一次), 开弹窗时一眼看清哪条已在库,不用关掉弹窗回面板对照。
+// @description  色花堂链接级一键入库(逐条磁力/ed2k)。每条链接手工选择类型: "番号"=影片(推→等→清小文件→strm→MDC刮削→Emby刷新→预热; MDC失败/不完整由油猴📤补充); "非番号"=剧集(推→等→重命名thread_xxx_S01E01..→SmartStrm生成strm→油猴📤补充元数据→Emby刷新+预热, 即使1个视频也是剧集)。左上角磁力导航面板列出全部链接可点击快速滚动定位。v1.6.3: 修复手机版磁力被 <wbr>/<br> 等空元素拆成多段文本节点导致的漏识别(全文本拼接兜底+iframe兜底); v1.7.0: 新增手动输入磁力/ed2k链接入库对话框(导航面板✏️按钮, 支持多条, 提交到当前thread); v1.8.0: 新增元数据补充——提取帖子标题/简介/图片, 由本机浏览器下载图片后上传服务器生成 Emby 海报与简介 (导航面板📤按钮); v1.8.1: 元数据图片抓取优化——只抓静态图片(jpg/png等, 排除gif/webp/svg/ico), 懒加载取真实地址(data-original/data-src), 像素尺寸过滤(太小的表情/图标/头像不抓, 超高清原图不抓); v1.8.2: 描述同步新流程(去MySQL, 剧集文件名 thread_xxx_S01E01, MDC失败/剧集均待油猴补充元数据); v1.8.3: API_BASE 改 http(未配https), 悬浮面板新增📋一键跳转任务监控页按钮; v1.8.4: 手机版图片识别兼容——Discuz 附件真实地址 file/zoomfile 属性、选择器抓不到时全量图片兜底、iframe 内正文跨框架收集、相对路径补全域名; v1.8.7: 简介提取终极兜底——按"含磁力/ed2k 链接的文本节点"定位正文容器(色花堂正文必含下载链接, 不受模板类名影响), 简介提取失败时面板显示具体原因。 v1.9.0: 图片改为用户手工选择(候选图网格点选, 支持动图gif/webp/avif, 最多9张), 已选支持📌海报/↑↓调序/✕移除, 上传保留原图格式(mime)不再强制jpg, 移动端触控优化。 v1.9.1: 候选图排除小尺寸表情/图标(像素<200或未加载时CSS尺寸<100x80), 恢复表情/笑脸区域跳过。 v1.9.2: 标题清洗——去掉发布者/来源前缀标记(自转/115ED2K等, 保留【Omar盘点】类系列名), 去掉体积/配额后缀【1.87G/25P+18V/1配额】, 去掉尾部分区与论坛后缀(- 综合讨论区 - 98堂[原色花堂])。 v1.9.5: 磁力导航面板每条磁力新增📋复制按钮(复制完整干净链接含&dn), 标签优先显示文件名; v1.9.6: 取消正文磁力链接旁"🎬入库"按钮(避免页面出现两个入库), 改为磁力导航面板每条磁力🚀一键入库(点🚀选类型: 番号/非番号); // ==UserScript==; v1.9.10: 磁力规则参考 JAV-FORUM——支持 32位 base32 磁力hash(原仅40位hex), ed2k 要求文件名非空(空文件名ed2k拒绝); v1.11.0: 新增批量入库(导航面板⚡按钮)——一次提交本页全部(或勾选)磁力/ed2k: 按行类型分组调 /api/import/batch(每组超100条自动分批), 支持👁dry-run预览、提交后并发轮询进度、面板关闭后头部保留进度徽章, 不再逐条点🚀逐条等, 顺带修掉面板/弹层内的磁力文本被 collectLinks 误收进导航列表; v1.11.1: 悬浮导航面板默认落位改到画面左上角(标题栏仍可拖动, 拖走后仅本次会话生效); v1.12.0: 面板头部重排为两行(标题行 + 工具条), 工具条四个按钮带文字均分宽, 标题不再被挤成两行、按钮不再顶出边界; 拖动后的落位用 GM 存储记住(刷新/翻页仍在原地, 越界自动收回画面内), 双击标题行复位到左上角; v1.13.0: 导航面板每条链接显示 115 库存徽章 ✅在库/❓不在库/⚠️未校验 (打开帖子页自动反查一次, 服务端缓存+分片, MCP 掉线一律显示"未校验"绝不当成"不在库"); v1.14.0: 库存反查带上帖子上下文(title/thread_id/contexts) —— 裸磁链(无 &dn=)也能从页面文本抠出番号, 不再一片⚠️; 服务端台账新增"番号→已入库"索引, 番号命中的 0 请求直答(MCP 掉线也答得出); 跨条查重防呆: 同一段文本供出≥2 条磁链(合集帖公共标题)则该番号作废, 宁缺勿错; 响应新增 src 字段说明番号来源, 控制台一行交代"115 请求数 + 番号来源分账" 【v1.14.1】库存反查: 当结果靠页面文本判定(或一条都没抠出番号)时, 控制台额外打印送给服务端的页面文本(由近到远), 用来核对抠出的番号是否为真。 【v1.15.0】批量入库面板每行直接显示库存徽章 ✅在库/❓不在库/⚠️未校验(与左上角面板同一套绘制入口, 打开弹窗时自己补查一次), 开弹窗时一眼看清哪条已在库,不用关掉弹窗回面板对照。 【v1.15.1】批量弹窗的「仅未提交」换成「仅未在库」——刚打开面板时 batchTasks 是空的, 旧按钮点下去等于全选(废按钮); 现在按库存结论跳过 ✅在库 的行, 拿不准的一律算未在库; 计数行同时写出「✅在库 N」, 库存还没查回全时标一句「(查库存中…)」。
 // @author       QwenPaw
 // @match        *://sehuatang.net/*
 // @match        *://sehuatang.org/*
@@ -589,6 +589,7 @@
     let batchMask = null;          // 批量面板根节点
     let batchRows = [];            // [{it, pick, kind, ov, res, rowEl}] ov=行内改过类型(不再跟随顶部默认)
     let batchRender = null;        // 面板开着时由 openBatchPanel 注册的行重绘函数(页面变化后调用)
+    let batchCountPaint = null;    // v1.15.1: 计数行重绘入口 —— 库存结果回来时要更新"✅在库 N"
     let batchTasks = [];           // 本次批量建的任务 [{task_id, norm, label, kind, status, msg}]
     let batchPollTimer = null;
     const taskByNorm = new Map();  // norm -> task (导航行末尾显示 🕒/✅/❌)
@@ -606,7 +607,7 @@
         if (pop) { pop.remove(); pop = null; }
         if (manualMask && except !== 'manual') { manualMask.remove(); manualMask = null; }
         if (metaMask && except !== 'meta') { metaMask.remove(); metaMask = null; }
-        if (batchMask && except !== 'batch') { batchMask.remove(); batchMask = null; batchRender = null; }
+        if (batchMask && except !== 'batch') { batchMask.remove(); batchMask = null; batchRender = null; batchCountPaint = null; }
     }
 
     function batchDefaultKind() {
@@ -726,7 +727,7 @@
             '    <button class="sht-batch-mini" data-act="all">全选</button>' +
             '    <button class="sht-batch-mini" data-act="none">全不选</button>' +
             '    <button class="sht-batch-mini" data-act="invert">反选</button>' +
-            '    <button class="sht-batch-mini" data-act="unsubmitted">仅未提交</button>' +
+            '    <button class="sht-batch-mini" data-act="notin" title="只勾选 115 里还没有的: 跳过 ✅在库 的行">仅未在库</button>' +
             '  </div>' +
             '  <div id="sht-batch-list"></div>' +
             '  <div id="sht-batch-status"></div>' +
@@ -749,8 +750,13 @@
         const updateCount = () => {
             const picked = batchRows.filter(r => r.pick);
             const f = picked.filter(r => r.kind === 'fanhao').length;
+            // v1.15.1: 把"✅在库 几条"直接写进计数行 —— 点「仅未在库」时才知道自己跳过了什么;
+            // 查库存还没回来时标一句, 免得把"暂时 0 条在库"当成事实。
+            const inLib = batchRows.filter(r => invIsIn(r.it.norm)).length;
+            const known = batchRows.filter(r => invCache.has(r.it.norm)).length;
             countEl.textContent = '共 ' + batchRows.length + ' 条, 已选 ' + picked.length +
-                (picked.length ? '(番号 ' + f + ' / 剧集 ' + (picked.length - f) + ')' : '');
+                (picked.length ? '(番号 ' + f + ' / 剧集 ' + (picked.length - f) + ')' : '') +
+                ' | ✅在库 ' + inLib + (known < batchRows.length ? ' (查库存中…)' : '');
         };
 
         const renderRows = () => {
@@ -840,6 +846,7 @@
         };
 
         batchRender = () => { renderRows(); updateCount(); syncRows(); renderProgress(); };
+        batchCountPaint = updateCount;      // v1.15.1: 库存结果回来时只刷新计数行, 不重建行(保住滚动位置)
 
         renderRows();
         updateCount();
@@ -875,17 +882,19 @@
         batchMask.querySelectorAll('.sht-batch-mini').forEach(b => {
             b.addEventListener('click', () => {
                 const act = b.dataset.act;
-                const submitted = new Set(batchTasks.map(t => t.norm));
                 if (act === 'all') batchRows.forEach(r => { r.pick = true; });
                 else if (act === 'none') batchRows.forEach(r => { r.pick = false; });
                 else if (act === 'invert') batchRows.forEach(r => { r.pick = !r.pick; });
-                else if (act === 'unsubmitted') batchRows.forEach(r => { r.pick = !submitted.has(r.it.norm); });
+                // v1.15.1: 原来是"仅未提交"(按本次会话的 batchTasks 过滤) —— 刚打开面板时
+                // batchTasks 是空的, 点下去等价于全选, 等于一个没用的按钮。改成按库存结论过滤:
+                // 只勾"115 里还没有的"(❓不在库 / ⚠️未校验 / 结果还没回来), 跳过 ✅在库。
+                else if (act === 'notin') batchRows.forEach(r => { r.pick = !invIsIn(r.it.norm); });
                 renderRows();
                 updateCount();
             });
         });
 
-        const close = () => { if (batchMask) { batchMask.remove(); batchMask = null; batchRender = null; } };
+        const close = () => { if (batchMask) { batchMask.remove(); batchMask = null; batchRender = null; batchCountPaint = null; } };
         batchMask.querySelector('#sht-batch-close').addEventListener('click', close);
         batchMask.querySelector('#sht-batch-cancel').addEventListener('click', close);
         batchMask.addEventListener('click', (e) => { if (e.target === batchMask) close(); });
@@ -1623,6 +1632,13 @@
                (r.fanhao ? ('\n' + fh) : '') + '\n(点 🚀 仍可正常入库)';
     }
 
+    // 这条在库存结论里已经是"在库"了吗 —— 徽章口径的唯一判断入口 (v1.15.1),
+    // 供「仅未在库」和计数行共用。拿不准(没查/未校验)一律算"不在库", 宁可多勾也不要漏勾。
+    function invIsIn(norm) {
+        const rec = invCache.get(norm);
+        return !!(rec && rec.item && rec.item.state === 'in');
+    }
+
     // 画一个徽章到指定元素 (v1.15.0): 面板行与批量弹窗行共用同一个口径 ——
     // 两处各描一遍必然会描出两个说法 (面板说在库、弹窗说未校验), 所以只留这一个入口。
     function invPaint(el, norm, baseCls, now) {
@@ -1657,6 +1673,8 @@
                     invPaint(r.rowEl.querySelector('.sht-batch-inv'), r.it.norm, 'sht-batch-inv', now);
                 }
             });
+            // v1.15.1: 计数行里的"✅在库 N"跟着一起更新 (结果是一批批回来的)
+            if (batchCountPaint) batchCountPaint();
         }
     }
 
