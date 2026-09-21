@@ -58,6 +58,10 @@ function boot(kind, resp) {
         if (String(o.url).indexOf('/api/import/lookup') >= 0) {
             seen.push(JSON.parse(o.data || '{}'));
             const body = resp ? resp(JSON.parse(o.data || '{}')) : { items: [], req_115: 0, elapsed_ms: 1, counts: {} };
+            if (body === null) {                      // resp 显式返回 null → 模拟"查库存失败"
+                setTimeout(() => o.onerror({ error: 'stub: 查库存失败' }), 1);
+                return;
+            }
             setTimeout(() => o.onload({ responseText: JSON.stringify(body) }), 1);
             return;
         }
@@ -151,6 +155,51 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         ok('unknown 提示里带原因', !!row && /番号/.test(row.title || ''), row && row.title);
         ok('一条都没抠出来时也打诊断行 (便于核对 DOM)',
            r.logs.some(l => /诊断/.test(l) && /SNOS-403/.test(l)), r.logs.filter(l => /诊断/.test(l)));
+    }
+
+    // ---------- 5. 批量弹窗行内徽章 (v1.15.0): 在弹窗里就能看清哪条已在库 ----------
+    {
+        const r = boot('rows', (b) => ({
+            items: b.links.map((l, i) => (i === 0
+                ? { link: l, link_hash: bh(0), fanhao: 'ABF-380', state: 'in', checked: 'ledger',
+                    src: 'ledger', count: 1, video: 1, dir: false }
+                : (i === 1
+                    ? { link: l, link_hash: bh(1), fanhao: 'ABF-381', state: 'out', checked: '115', src: 'ctx' }
+                    : { link: l, link_hash: bh(i), fanhao: '', state: 'unknown', reason: 'mcp_down', src: '' }))),
+            req_115: 1, elapsed_ms: 9, counts: { in: 1, out: 1, unknown: 10 }
+        }));
+        await sleep(80);
+        const d = r.w.document;
+        const navBadge = d.querySelector('#sht-nav .sht-nav-item .sht-nav-inv');
+        ok('面板上先有徽章', !!navBadge && /在库/.test(navBadge.textContent), navBadge && navBadge.textContent);
+
+        d.querySelector('#sht-nav-batch').click();
+        await sleep(80);
+        const rows = d.querySelectorAll('#sht-batch-list .sht-batch-row');
+        const badges = d.querySelectorAll('#sht-batch-list .sht-batch-inv');
+        ok('弹窗渲染出 12 行', rows.length === 12, rows.length);
+        ok('每行都有徽章位', badges.length === 12, badges.length);
+        ok('第 1 行 ✅在库', /在库/.test(badges[0].textContent), badges[0].textContent);
+        ok('第 2 行 ❓不在库', /不在库/.test(badges[1].textContent), badges[1].textContent);
+        ok('第 3 行 ⚠️未校验 (MCP 掉线不当成不在库)', /未校验/.test(badges[2].textContent), badges[2].textContent);
+        ok('徽章三态 class 正确',
+           badges[0].classList.contains('inv-in') && badges[1].classList.contains('inv-out') &&
+           badges[2].classList.contains('inv-unk'),
+           [badges[0].className, badges[1].className, badges[2].className]);
+        ok('弹窗徽章带 tooltip (与面板同一口径)',
+           /在库 —— /.test(badges[0].title || '') && badges[0].title === navBadge.title, badges[0].title);
+        ok('打开弹窗不再重复查库存 (缓存命中)', r.seen.length === 1, r.seen.length);
+    }
+
+    // ---------- 6. 面板查库存失败 + 首开弹窗 → 弹窗自己补一次 (徽章不能永远空着) ----------
+    {
+        const r = boot('one', () => null);            // 桩: 查库存直接失败
+        await sleep(80);
+        r.w.document.querySelector('#sht-nav-batch').click();
+        await sleep(80);
+        ok('弹窗自己补查了一次', r.seen.length === 2, r.seen.length);
+        const badge = r.w.document.querySelector('#sht-batch-list .sht-batch-inv');
+        ok('查不到就留空 (不暗示"不在库")', !!badge && badge.textContent === '', badge && badge.textContent);
     }
 
     console.log('\n===== 前端桩测: ' + (fail ? ('失败 ' + fail + ' 项 / 共 ' + (pass + fail)) : ('全部通过 (' + pass + ')')) + ' =====');
