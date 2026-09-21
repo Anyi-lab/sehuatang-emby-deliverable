@@ -76,7 +76,7 @@ sehuatang-emby-deliverable/
 1. 安装油猴（Tampermonkey）插件
 2. 导入 `src/userscript/sehuatang_import.user.js`
 3. 修改脚本头部 `API_BASE` 为你的服务器地址：`http://<SERVER_IP>:5081`
-4. 打开色花堂任意帖子页 → 右下角出现导航面板 → 点链接类型按钮入库
+4. 打开色花堂任意帖子页 → 左上角出现导航面板 → 点链接类型按钮入库
 
 ### 3.3 使用流程
 
