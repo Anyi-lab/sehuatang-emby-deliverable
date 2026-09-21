@@ -202,6 +202,41 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         ok('查不到就留空 (不暗示"不在库")', !!badge && badge.textContent === '', badge && badge.textContent);
     }
 
+    // ---------- 7. 「仅未在库」(v1.15.1): 跳过 ✅在库 的行 ----------
+    // 旧按钮是「仅未提交」——刚打开面板时 batchTasks 是空的, 点下去等于全选, 等于没用。
+    {
+        const r = boot('rows', (b) => ({
+            items: b.links.map((l, i) => (i === 0
+                ? { link: l, link_hash: bh(0), fanhao: 'ABF-380', state: 'in', checked: 'ledger',
+                    src: 'ledger', count: 1, video: 1, dir: false }
+                : (i === 1
+                    ? { link: l, link_hash: bh(1), fanhao: 'ABF-381', state: 'out', checked: '115', src: 'ctx' }
+                    : { link: l, link_hash: bh(i), fanhao: '', state: 'unknown', reason: 'mcp_down', src: '' }))),
+            req_115: 1, elapsed_ms: 9, counts: { in: 1, out: 1, unknown: 10 }
+        }));
+        await sleep(80);
+        const d = r.w.document;
+        d.querySelector('#sht-nav-batch').click();
+        await sleep(80);
+        const count = () => d.querySelector('#sht-batch-count').textContent;
+        ok('计数行写出 ✅在库 几条', /✅在库 1/.test(count()), count());
+        ok('没有"查库存中"残留 (结果已回全)', !/查库存中/.test(count()), count());
+
+        const btn = d.querySelector('#sht-batch-list')
+            && d.querySelector('.sht-batch-mini[data-act="notin"]');
+        ok('按钮已改名「仅未在库」', !!btn && btn.textContent === '仅未在库', btn && btn.textContent);
+        ok('旧的「仅未提交」按钮已移除', !d.querySelector('.sht-batch-mini[data-act="unsubmitted"]'));
+
+        btn.click();
+        const rows = d.querySelectorAll('#sht-batch-list .sht-batch-row');
+        const cks = [...rows].map(x => x.querySelector('.sht-batch-ck').checked);
+        ok('✅在库 的第 1 行被取消勾选', cks[0] === false, cks);
+        ok('❓不在库 的第 2 行仍勾选', cks[1] === true, cks);
+        ok('⚠️未校验 的第 3 行也勾选 (拿不准一律算未在库)', cks[2] === true, cks);
+        ok('勾选数 = 12 - 1', /已选 11/.test(count()), count());
+        ok('未勾选的行视觉上也变暗', rows[0].classList.contains('off'));
+    }
+
     console.log('\n===== 前端桩测: ' + (fail ? ('失败 ' + fail + ' 项 / 共 ' + (pass + fail)) : ('全部通过 (' + pass + ')')) + ' =====');
     process.exit(fail ? 1 : 0);
 })();
