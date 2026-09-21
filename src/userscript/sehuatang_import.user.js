@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         色花堂链接级一键入库(逐条磁力/ed2k) + 元数据补充
 // @namespace    sehuatang-import
-// @version      1.11.1
+// @version      1.12.0
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @source       https://github.com/Anyi-lab/sehuatang-emby-deliverable
-// @description  色花堂链接级一键入库(逐条磁力/ed2k)。每条链接手工选择类型: "番号"=影片(推→等→清小文件→strm→MDC刮削→Emby刷新→预热; MDC失败/不完整由油猴📤补充); "非番号"=剧集(推→等→重命名thread_xxx_S01E01..→SmartStrm生成strm→油猴📤补充元数据→Emby刷新+预热, 即使1个视频也是剧集)。左上角磁力导航面板列出全部链接可点击快速滚动定位。v1.6.3: 修复手机版磁力被 <wbr>/<br> 等空元素拆成多段文本节点导致的漏识别(全文本拼接兜底+iframe兜底); v1.7.0: 新增手动输入磁力/ed2k链接入库对话框(导航面板✏️按钮, 支持多条, 提交到当前thread); v1.8.0: 新增元数据补充——提取帖子标题/简介/图片, 由本机浏览器下载图片后上传服务器生成 Emby 海报与简介 (导航面板📤按钮); v1.8.1: 元数据图片抓取优化——只抓静态图片(jpg/png等, 排除gif/webp/svg/ico), 懒加载取真实地址(data-original/data-src), 像素尺寸过滤(太小的表情/图标/头像不抓, 超高清原图不抓); v1.8.2: 描述同步新流程(去MySQL, 剧集文件名 thread_xxx_S01E01, MDC失败/剧集均待油猴补充元数据); v1.8.3: API_BASE 改 http(未配https), 悬浮面板新增📋一键跳转任务监控页按钮; v1.8.4: 手机版图片识别兼容——Discuz 附件真实地址 file/zoomfile 属性、选择器抓不到时全量图片兜底、iframe 内正文跨框架收集、相对路径补全域名; v1.8.7: 简介提取终极兜底——按"含磁力/ed2k 链接的文本节点"定位正文容器(色花堂正文必含下载链接, 不受模板类名影响), 简介提取失败时面板显示具体原因。 v1.9.0: 图片改为用户手工选择(候选图网格点选, 支持动图gif/webp/avif, 最多9张), 已选支持📌海报/↑↓调序/✕移除, 上传保留原图格式(mime)不再强制jpg, 移动端触控优化。 v1.9.1: 候选图排除小尺寸表情/图标(像素<200或未加载时CSS尺寸<100x80), 恢复表情/笑脸区域跳过。 v1.9.2: 标题清洗——去掉发布者/来源前缀标记(自转/115ED2K等, 保留【Omar盘点】类系列名), 去掉体积/配额后缀【1.87G/25P+18V/1配额】, 去掉尾部分区与论坛后缀(- 综合讨论区 - 98堂[原色花堂])。 v1.9.5: 磁力导航面板每条磁力新增📋复制按钮(复制完整干净链接含&dn), 标签优先显示文件名; v1.9.6: 取消正文磁力链接旁"🎬入库"按钮(避免页面出现两个入库), 改为磁力导航面板每条磁力🚀一键入库(点🚀选类型: 番号/非番号); // ==UserScript==; v1.9.10: 磁力规则参考 JAV-FORUM——支持 32位 base32 磁力hash(原仅40位hex), ed2k 要求文件名非空(空文件名ed2k拒绝); v1.11.0: 新增批量入库(导航面板⚡按钮)——一次提交本页全部(或勾选)磁力/ed2k: 按行类型分组调 /api/import/batch(每组超100条自动分批), 支持👁dry-run预览、提交后并发轮询进度、面板关闭后头部保留进度徽章, 不再逐条点🚀逐条等, 顺带修掉面板/弹层内的磁力文本被 collectLinks 误收进导航列表; v1.11.1: 悬浮导航面板默认落位改到画面左上角(标题栏仍可拖动, 拖走后仅本次会话生效)
+// @description  色花堂链接级一键入库(逐条磁力/ed2k)。每条链接手工选择类型: "番号"=影片(推→等→清小文件→strm→MDC刮削→Emby刷新→预热; MDC失败/不完整由油猴📤补充); "非番号"=剧集(推→等→重命名thread_xxx_S01E01..→SmartStrm生成strm→油猴📤补充元数据→Emby刷新+预热, 即使1个视频也是剧集)。左上角磁力导航面板列出全部链接可点击快速滚动定位。v1.6.3: 修复手机版磁力被 <wbr>/<br> 等空元素拆成多段文本节点导致的漏识别(全文本拼接兜底+iframe兜底); v1.7.0: 新增手动输入磁力/ed2k链接入库对话框(导航面板✏️按钮, 支持多条, 提交到当前thread); v1.8.0: 新增元数据补充——提取帖子标题/简介/图片, 由本机浏览器下载图片后上传服务器生成 Emby 海报与简介 (导航面板📤按钮); v1.8.1: 元数据图片抓取优化——只抓静态图片(jpg/png等, 排除gif/webp/svg/ico), 懒加载取真实地址(data-original/data-src), 像素尺寸过滤(太小的表情/图标/头像不抓, 超高清原图不抓); v1.8.2: 描述同步新流程(去MySQL, 剧集文件名 thread_xxx_S01E01, MDC失败/剧集均待油猴补充元数据); v1.8.3: API_BASE 改 http(未配https), 悬浮面板新增📋一键跳转任务监控页按钮; v1.8.4: 手机版图片识别兼容——Discuz 附件真实地址 file/zoomfile 属性、选择器抓不到时全量图片兜底、iframe 内正文跨框架收集、相对路径补全域名; v1.8.7: 简介提取终极兜底——按"含磁力/ed2k 链接的文本节点"定位正文容器(色花堂正文必含下载链接, 不受模板类名影响), 简介提取失败时面板显示具体原因。 v1.9.0: 图片改为用户手工选择(候选图网格点选, 支持动图gif/webp/avif, 最多9张), 已选支持📌海报/↑↓调序/✕移除, 上传保留原图格式(mime)不再强制jpg, 移动端触控优化。 v1.9.1: 候选图排除小尺寸表情/图标(像素<200或未加载时CSS尺寸<100x80), 恢复表情/笑脸区域跳过。 v1.9.2: 标题清洗——去掉发布者/来源前缀标记(自转/115ED2K等, 保留【Omar盘点】类系列名), 去掉体积/配额后缀【1.87G/25P+18V/1配额】, 去掉尾部分区与论坛后缀(- 综合讨论区 - 98堂[原色花堂])。 v1.9.5: 磁力导航面板每条磁力新增📋复制按钮(复制完整干净链接含&dn), 标签优先显示文件名; v1.9.6: 取消正文磁力链接旁"🎬入库"按钮(避免页面出现两个入库), 改为磁力导航面板每条磁力🚀一键入库(点🚀选类型: 番号/非番号); // ==UserScript==; v1.9.10: 磁力规则参考 JAV-FORUM——支持 32位 base32 磁力hash(原仅40位hex), ed2k 要求文件名非空(空文件名ed2k拒绝); v1.11.0: 新增批量入库(导航面板⚡按钮)——一次提交本页全部(或勾选)磁力/ed2k: 按行类型分组调 /api/import/batch(每组超100条自动分批), 支持👁dry-run预览、提交后并发轮询进度、面板关闭后头部保留进度徽章, 不再逐条点🚀逐条等, 顺带修掉面板/弹层内的磁力文本被 collectLinks 误收进导航列表; v1.11.1: 悬浮导航面板默认落位改到画面左上角(标题栏仍可拖动, 拖走后仅本次会话生效); v1.12.0: 面板头部重排为两行(标题行 + 工具条), 工具条四个按钮带文字均分宽, 标题不再被挤成两行、按钮不再顶出边界; 拖动后的落位用 GM 存储记住(刷新/翻页仍在原地, 越界自动收回画面内), 双击标题行复位到左上角
 // @author       QwenPaw
 // @match        *://sehuatang.net/*
 // @match        *://sehuatang.org/*
@@ -1376,27 +1376,67 @@
     }
 
     // ===== 悬浮导航面板 =====
-    let nav = null, navList = null, navCollapsed = false;
+    let nav = null, navList = null, navCollapsed = false, navResizeBound = false;
+
+    // 落位持久化 (v1.12.0): 拖动后记住 left/top, 双击标题栏复位到左上角
+    const NAV_POS_KEY = 'shtNavPos';
+    const NAV_HOME = { left: 16, top: 16 };
+    function applyNavPos(pos) {
+        if (!nav || !pos) return;
+        const w = nav.offsetWidth || 280;
+        const maxLeft = Math.max(0, window.innerWidth - w);
+        const maxTop = Math.max(0, window.innerHeight - 40);
+        nav.style.left = Math.min(Math.max(0, Number(pos.left) || 0), maxLeft) + 'px';
+        nav.style.top = Math.min(Math.max(0, Number(pos.top) || 0), maxTop) + 'px';
+        nav.style.right = 'auto';
+        nav.style.bottom = 'auto';
+    }
+    function restoreNavPos() {
+        let pos = null;
+        try { pos = JSON.parse(GM_getValue(NAV_POS_KEY, '') || 'null'); } catch (e) { pos = null; }
+        applyNavPos(pos);
+    }
+    function saveNavPos() {
+        if (!nav) return;
+        const num = (v, fb) => { const n = parseFloat(v); return isFinite(n) ? n : fb; };
+        const left = num(nav.style.left, nav.offsetLeft);
+        const top = num(nav.style.top, nav.offsetTop);
+        try { GM_setValue(NAV_POS_KEY, JSON.stringify({ left: left, top: top })); } catch (e) {}
+    }
+    function resetNavPos() {
+        try { GM_setValue(NAV_POS_KEY, ''); } catch (e) {}
+        nav.style.left = NAV_HOME.left + 'px';
+        nav.style.top = NAV_HOME.top + 'px';
+        nav.style.right = 'auto';
+        nav.style.bottom = 'auto';
+        toast('面板已复位到左上角');
+    }
+
     function buildNav() {
         if (nav) { nav.remove(); }
         nav = document.createElement('div');
         nav.id = 'sht-nav';
         nav.innerHTML =
             '<div id="sht-nav-head">' +
-            '  <span id="sht-nav-title">📌 磁力导航</span>' +
-            '  <span id="sht-nav-count"></span>' +
-            '  <button id="sht-nav-batch" title="批量入库: 一次提交本页全部(或勾选)磁力/ed2k">⚡</button>' +
-            '  <span id="sht-nav-badge" title="批量入库进度(点击查看)"></span>' +
-            '  <button id="sht-nav-tasks" title="打开任务监控页">📋</button>' +
-            '  <button id="sht-nav-meta" title="上传元数据(海报/简介)">📤</button>' +
-            '  <button id="sht-nav-manual" title="手动输入磁力/ed2k 链接入库">✏️</button>' +
-            '  <button id="sht-nav-fold" title="折叠/展开">—</button>' +
+            '  <div id="sht-nav-headrow">' +
+            '    <span id="sht-nav-title">📌 磁力导航</span>' +
+            '    <span id="sht-nav-count"></span>' +
+            '    <span id="sht-nav-badge" title="批量入库进度(点击查看)"></span>' +
+            '    <button id="sht-nav-fold" title="折叠/展开 (双击标题栏复位到左上角)">—</button>' +
+            '  </div>' +
+            '  <div id="sht-nav-toolbar">' +
+            '    <button id="sht-nav-batch" title="批量入库: 一次提交本页全部(或勾选)磁力/ed2k">⚡ 批量</button>' +
+            '    <button id="sht-nav-tasks" title="打开任务监控页">📋 任务</button>' +
+            '    <button id="sht-nav-meta" title="上传元数据(海报/简介)">📤 元数据</button>' +
+            '    <button id="sht-nav-manual" title="手动输入磁力/ed2k 链接入库">✏️ 手动</button>' +
+            '  </div>' +
             '</div>' +
             '<div id="sht-nav-body">' +
             '  <div id="sht-nav-list"></div>' +
             '</div>';
         document.body.appendChild(nav);
         navList = nav.querySelector('#sht-nav-list');
+        restoreNavPos();
 
         nav.querySelector('#sht-nav-tasks').addEventListener('click', (e) => {
             e.stopPropagation();
@@ -1430,11 +1470,20 @@
             nav.querySelector('#sht-nav-fold').textContent = navCollapsed ? '+' : '—';
         });
 
+        // v1.12.0: 窗口变小/放大后, 把面板收回可视范围(不改变用户存的位置, 只做边界收敛)
+        if (!navResizeBound) {
+            navResizeBound = true;
+            window.addEventListener('resize', () => {
+                if (nav) applyNavPos({ left: parseFloat(nav.style.left) || nav.offsetLeft, top: parseFloat(nav.style.top) || nav.offsetTop });
+            });
+        }
+
         // ===== 拖拽移动悬浮窗 (按住标题栏拖动) =====
         const head = nav.querySelector('#sht-nav-head');
         let drag = null;
         head.addEventListener('pointerdown', (e) => {
             if (e.target.closest('button')) return;   // 按钮区域不触发拖拽
+            if (e.target.closest('#sht-nav-toolbar')) return;  // 工具条整片不拖拽
             e.preventDefault();
             const r = nav.getBoundingClientRect();
             drag = { sx: e.clientX, sy: e.clientY, ox: r.left, oy: r.top, moved: false };
@@ -1442,7 +1491,7 @@
             nav.style.top = drag.oy + 'px';
             nav.style.right = 'auto';
             nav.style.bottom = 'auto';
-            head.setPointerCapture && head.setPointerCapture(e.pointerId);
+            try { head.setPointerCapture && head.setPointerCapture(e.pointerId); } catch (err) {}
             head.classList.add('dragging');
         });
         head.addEventListener('pointermove', (e) => {
@@ -1456,12 +1505,20 @@
         });
         const endDrag = (e) => {
             if (!drag) return;
+            const moved = drag.moved;
             drag = null;
             head.classList.remove('dragging');
-            if (head.releasePointerCapture && e.pointerId) head.releasePointerCapture(e.pointerId);
+            try { if (head.releasePointerCapture && e.pointerId) head.releasePointerCapture(e.pointerId); } catch (err) {}
+            if (moved) saveNavPos();   // v1.12.0: 记住落位, 刷新后仍在原地
         };
         head.addEventListener('pointerup', endDrag);
         head.addEventListener('pointercancel', endDrag);
+
+        // 双击标题行 → 复位到左上角默认落位
+        nav.querySelector('#sht-nav-headrow').addEventListener('dblclick', (e) => {
+            e.stopPropagation();
+            resetNavPos();
+        });
 
         renderNavList();
     }
@@ -1531,15 +1588,19 @@
         const s = document.createElement('style');
         s.textContent = `
 #sht-nav{position:fixed;left:16px;top:16px;z-index:2147483647;width:280px;max-height:70vh;display:flex;flex-direction:column;background:rgba(15,23,42,.94);border:1px solid #334155;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.5);font-family:'Segoe UI',system-ui,sans-serif;overflow:hidden}
-#sht-nav-head{display:flex;align-items:center;gap:6px;padding:8px 10px;background:linear-gradient(135deg,#e63946,#d90429);color:#fff;font-size:13px;font-weight:700;cursor:grab;user-select:none;touch-action:none}
+#sht-nav-head{display:flex;flex-direction:column;gap:6px;padding:8px 10px;background:linear-gradient(135deg,#e63946,#d90429);color:#fff;font-size:13px;font-weight:700;cursor:grab;user-select:none;touch-action:none}
 #sht-nav-head:active{cursor:grabbing}
 #sht-nav-head.dragging{cursor:grabbing}
-#sht-nav-count{opacity:.85;font-weight:400}
-#sht-nav-manual,#sht-nav-meta{margin-left:auto;padding:2px 7px;border:none;border-radius:6px;background:rgba(255,255,255,.2);color:#fff;font-size:13px;cursor:pointer}
-#sht-nav-manual{margin-left:0}
-#sht-nav-meta:hover,#sht-nav-manual:hover{background:rgba(255,255,255,.35)}
-#sht-nav-fold{padding:2px 7px;border:none;border-radius:6px;background:rgba(255,255,255,.2);color:#fff;font-size:13px;cursor:pointer}
-#sht-nav-body{overflow-y:auto;max-height:calc(70vh - 40px)}
+#sht-nav-headrow{display:flex;align-items:center;gap:6px;min-width:0}
+#sht-nav-title{flex:none;white-space:nowrap}
+#sht-nav-count{flex:none;opacity:.85;font-weight:400}
+#sht-nav-toolbar{display:flex;gap:6px}
+#sht-nav-toolbar button{flex:1 1 0;min-width:0;padding:3px 0;border:none;border-radius:6px;background:rgba(255,255,255,.18);color:#fff;font-size:11px;font-weight:600;font-family:inherit;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#sht-nav-toolbar button:hover{background:rgba(255,255,255,.38)}
+#sht-nav-toolbar button:active{background:rgba(255,255,255,.5)}
+#sht-nav-fold{margin-left:auto;flex:none;padding:1px 8px;border:none;border-radius:6px;background:rgba(255,255,255,.2);color:#fff;font-size:13px;line-height:1.35;cursor:pointer}
+#sht-nav-fold:hover{background:rgba(255,255,255,.38)}
+#sht-nav-body{overflow-y:auto;max-height:calc(70vh - 78px)}
 #sht-nav-list{padding:4px}
 .sht-nav-item{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;color:#e2e8f0;font-size:12px;cursor:pointer}
 .sht-nav-item:hover{background:#1e293b}
@@ -1622,9 +1683,7 @@
 #sht-meta-ok:hover,#sht-modal-ok:hover,#sht-batch-ok:hover{filter:brightness(1.1)}
 #sht-meta-ok:disabled,#sht-modal-ok:disabled,#sht-batch-ok:disabled,#sht-batch-preview:disabled{cursor:wait;opacity:.75}
 /* ===== 批量入库 (v1.11.0) ===== */
-#sht-nav-batch,#sht-nav-tasks{padding:2px 7px;border:none;border-radius:6px;background:rgba(255,255,255,.2);color:#fff;font-size:13px;cursor:pointer}
-#sht-nav-batch:hover,#sht-nav-tasks:hover{background:rgba(255,255,255,.35)}
-#sht-nav-badge{color:#fff;font-size:11px;font-weight:700;background:rgba(0,0,0,.28);border-radius:8px;padding:1px 6px;cursor:pointer;white-space:nowrap}
+#sht-nav-badge{flex:none;color:#fff;font-size:11px;font-weight:700;background:rgba(0,0,0,.28);border-radius:8px;padding:1px 6px;cursor:pointer;white-space:nowrap}
 #sht-nav-badge:empty{display:none}
 .sht-nav-st{flex:none;font-size:11px;min-width:0;cursor:help}
 #sht-batch-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;background:#0b1220;border:1px solid #1e293b;border-radius:10px}
