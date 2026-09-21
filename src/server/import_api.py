@@ -4491,7 +4491,9 @@ INV_MAP_TTL_S   = 30    # 台账 hash→番号 映射重建间隔
 _INV_CACHE = {}          # fanhao_key -> (ts, item)  查询结果缓存
 _INV_CACHE_LOCK = threading.Lock()
 # h2f: infohash->番号; done: 已成功入库; gone: 已被删除(台账不可信, 必须问 115 实测)
-_INV_MAP = {'ts': 0.0, 'h2f': {}, 'done': set(), 'gone': set()}
+# f2done: 番号(归一键)->True, 见 _inv_ledger_map —— 台账按【番号】建的第二种索引,
+#         给"链接没带番号、但页面上下文能抠出番号"的情况兜 0 请求直答。
+_INV_MAP = {'ts': 0.0, 'h2f': {}, 'done': set(), 'gone': set(), 'f2done': {}}
 _INV_MAP_LOCK = threading.Lock()
 
 
@@ -4545,23 +4547,76 @@ def _inv_fanhao_from_link(link):
     return _inv_extract_fanhao(s)
 
 
+def _inv_fanhao_candidates(text):
+    """抠出文本里【所有】番号候选 (带横线的搜索形式, 按归一化键去重, 保序)。
+
+    用于"唯一候选才敢采信"的防呆 (A+B, 2026-09-21): 候选 > 1 说明这段文本里混了噪声
+    —— 实测台账标题三种典型噪声: 'mtabs-009 …ハメ潮SEX20本番'(SEX20)、
+    'cjob-147 …BEST52本番'(BEST52)、'第一會所新片@SIS001@HNDS-079'(SIS1)。
+    这时宁缺勿错: 返回多用不上的候选, 由调用方按 len()==1 决定是否采信。
+    """
+    out, seen = [], set()
+    for m in _FANHAO_RE.finditer(str(text or '').upper()):
+        f = _inv_search_form(m.group(1))
+        k = _fanhao_key(f) if f else ''
+        if k and k not in seen:
+            seen.add(k)
+            out.append(f)
+    return out
+
+
+def _inv_fanhao_from_ctx(ctxs):
+    """从页面上下文里抠番号 (B 方案): 就近优先, 取第一个【恰好只含 1 个候选】的文本层。
+
+    返回 (番号, 证据文本): 证据文本要带回去做跨条查重 —— 同一段文本若被 ≥2 条磁链
+    共用 (合集帖的公共标题/正文), 那它就不可能是每一条各自的番号, 必须作废。
+    """
+    for s in (ctxs or []):
+        if not isinstance(s, str):
+            continue
+        cands = _inv_fanhao_candidates(s)
+        if len(cands) == 1:
+            return cands[0], str(s)[:160]
+    return '', ''
+
+
 def _inv_ledger_map():
-    """本地台账映射 (0 请求): infohash→番号, 已成功入库的 infohash, 已被删除的 infohash。
+    """本地台账映射 (0 请求): 四件套 —— hash→番号 / 已入库 hash / 已删除 hash / 番号→已入库。
 
     355 行台账全扫 <10ms, 30s 重建一次。实测 257/355 (72%) 的磁链在这里就能拿到番号。
     被排除在"直答在库"之外的两种:
       - status='failed'  该 hash 从未成功入库
       - status='deleted' 用户明确删过这份内容 (台账现存 16 条, 全是"VR 已删除(无 VR 设备)")
         → 台账不再可信, 必须回落到 115 实搜
+
+    f2done 是【番号】为键的第二张索引 (A 方案, 2026-09-21):
+      原来 `if not h: continue` 在抠番号之前, 台账里 58 行 magnet 为空、拿不到 hash 的记录
+      整行在第一步就被丢掉 —— 可它们的 title 里明明写着番号 (实测 47/58 恰好 1 个候选)。
+      所以顺序反过来: 先抠番号装满 f2done, 再判 hash。
+    语义差别: done/gone 是 hash 级 (这条磁链的内容入过库), f2done 是番号级
+      (这个番号入过库, 可能是另一条磁链推的) —— 后者与 115 实搜是同一语义层级
+      (_inv_verdict 的判据本来就是"115 里文件名含这个番号"), 故两者可互为缓存。
     """
     now = time.time()
     with _INV_MAP_LOCK:
         if now - _INV_MAP['ts'] < INV_MAP_TTL_S:
-            return _INV_MAP['h2f'], _INV_MAP['done'], _INV_MAP['gone']
-    h2f, done, gone = {}, set(), set()
+            return (_INV_MAP['h2f'], _INV_MAP['done'], _INV_MAP['gone'], _INV_MAP['f2done'])
+    h2f, done, gone, f_done, f_gone = {}, set(), set(), set(), set()
     try:
         c = sqlite3.connect(LOG_DB)
         for magnet, title, status in c.execute('SELECT magnet, title, status FROM import_log'):
+            # ① 先抠番号: title 里"恰好 1 个候选"才算唯一证据; 有噪声时退到链接文件名
+            cands = _inv_fanhao_candidates(title)
+            strict = cands[0] if len(cands) == 1 else ''
+            link_f = _inv_fanhao_from_link(magnet)
+            f = strict or link_f                      # f2done 只吃可信来源
+            if f:
+                k = _fanhao_key(f)
+                if status == 'done':
+                    f_done.add(k)
+                elif status == 'deleted':
+                    f_gone.add(k)
+            # ② 再判 hash (这一句必须留在后面, 否则 58 行走不到上面)
             h = _inv_hash(magnet)
             if not h:
                 continue
@@ -4569,15 +4624,19 @@ def _inv_ledger_map():
                 done.add(h)
             elif status == 'deleted':
                 gone.add(h)
-            f = _inv_extract_fanhao(title) or _inv_fanhao_from_link(magnet)
-            if f:
-                h2f[h] = f
+            # h2f 口径放宽一档: 严格候选 → 链接文件名 → 旧口径第一个候选。
+            # 它只做展示+搜索词, 不参与"在库"判定, 所以可以容忍噪声。
+            hf = strict or link_f or (cands[0] if cands else '')
+            if hf:
+                h2f[h] = hf
         c.close()
     except Exception as e:
         log.warning('[inv] 台账映射构建失败: %s', str(e)[:150])
+    # deleted 优先 (与 done/gone 那条 `<h in done and h not in gone>` 同口径)
+    f2done = {k: True for k in f_done if k not in f_gone}
     with _INV_MAP_LOCK:
-        _INV_MAP.update({'ts': now, 'h2f': h2f, 'done': done, 'gone': gone})
-    return h2f, done, gone
+        _INV_MAP.update({'ts': now, 'h2f': h2f, 'done': done, 'gone': gone, 'f2done': f2done})
+    return h2f, done, gone, f2done
 
 
 def _inv_hit_matches(name, key):
@@ -4694,13 +4753,47 @@ def _inv_query_many(pairs, out):
     return req
 
 
-def inventory_lookup(links):
+def _inv_clean_ctxs(raw, max_len=200, max_levels=8, max_total=60000):
+    """清洗前端送来的 contexts: 必须是 list[list[str]], 每条截断, 总量封顶。
+
+    上限按最坏情况留头: 40 条 × 8 层 × 200 = 64000 > 60000, 所以总封顶真能被触发。
+    (前端实际只送 5 层 + 可能 1 层页面标题 = 40×6×200 = 48000, 不会误伤。)
+    形状不对 → 返回 None, 上游据此整批丢弃。宁可全页 ⚠️, 也不要错位套上别人的番号。
+    """
+    if not isinstance(raw, list) or not raw:
+        return None
+    out, total = [], 0
+    for row in raw:
+        if isinstance(row, str):
+            row = [row]
+        if not isinstance(row, list):
+            return None
+        line = []
+        for s in row[:max_levels]:
+            if not isinstance(s, str):
+                continue
+            s = s.strip()[:max_len]
+            if s:
+                line.append(s)
+                total += len(s)
+        out.append(line)
+    return out if total <= max_total else None
+
+
+def inventory_lookup(links, title='', thread_id='', thread_url='', contexts=None, single=None):
     """磁链批量库存反查 (POST /api/import/lookup)。
 
-    入参: ['magnet:?xt=urn:btih:...', 'ed2k://|file|...']  (≤ INV_MAX_LINKS 条)
+    links: ['magnet:?xt=urn:btih:...', 'ed2k://|file|...']  (≤ INV_MAX_LINKS 条)
+    title / thread_id / thread_url: 帖子上下文, 与入库 /api/import/batch 同一份来源
+    contexts: list[list[str]], 与 links 严格同序; 每条是"就近 → 逐层放宽"的页面文本
+    single: 客户端声明"本页只有这一条链接"。为 None 时按 len(links)==1 猜 (兼容老脚本),
+            前端 v1.14.0+ 必须显式传 —— 41 条以上的帖子分片后, 第二片只剩 1 条,
+            按长度猜会把整页标题套到它头上。
     出参: {'items': [与入参同序], 'req_115': 实际发出的 115 请求数, 'elapsed_ms': n}
-    item: {link, link_hash, fanhao, state: in|out|unknown, reason?, checked?,
+    item: {link, link_hash, fanhao, state: in|out|unknown, reason?, checked?, src?,
            count, video, dir, cached?}
+    checked: ledger (hash 命中台账, 强证据) / ledger_fanhao (番号命中台账) / 115
+    src:     番号来源 ledger | magnet | ctx | title
     state=unknown 时 reason ∈ {no_fanhao, mcp_down, ratelimit} —— 前端必须按"未校验"渲染。
     """
     if not isinstance(links, list):
@@ -4709,37 +4802,72 @@ def inventory_lookup(links):
     if not links:
         return {'items': [], 'req_115': 0, 'elapsed_ms': 0}
     t0 = time.time()
-    h2f, done, gone = _inv_ledger_map()
-    out, need = [], []
-    for link in links:
+    h2f, done, gone, f2done = _inv_ledger_map()
+    # contexts 长度对不上 → 整批丢弃, 绝不"尽力对齐" (错位必然给出假 ✅)
+    ctxs = contexts if (isinstance(contexts, list) and len(contexts) == len(links)) else None
+    title = str(title or '')[:200]
+    single = (len(links) == 1) if single is None else bool(single)
+
+    out, pend, ev = [], [], {}
+    for idx, link in enumerate(links):
         h = _inv_hash(link)
-        form = h2f.get(h, '') if h else ''
-        it = {'link': link, 'link_hash': h, 'fanhao': form, 'state': '',
-              'src': 'ledger' if form else ''}
+        it = {'link': link, 'link_hash': h, 'fanhao': '', 'state': '', 'src': ''}
         if h and h in done and h not in gone:
-            # 台账里这条 hash 已成功入库过, 且没被删过 → 0 请求直答
-            # (不要求解析出番号: 前端按 link_hash 挂徽章, 番号只是附带的展示信息)
-            it.update({'state': 'in', 'checked': 'ledger'})
+            # 台账里这条 hash 已成功入库过, 且没被删过 → 0 请求直答 (hash 级强证据)
+            it.update({'fanhao': h2f.get(h, ''), 'src': 'ledger',
+                       'state': 'in', 'checked': 'ledger'})
             out.append(it)
             continue
+        form = h2f.get(h, '') if h else ''
+        src = 'ledger' if form else ''
         if not form:
             form = _inv_fanhao_from_link(link)
+            src = 'magnet' if form else ''
+        if not form and ctxs:
+            form, scope = _inv_fanhao_from_ctx(ctxs[idx])      # B: 页面上下文
             if form:
-                it.update({'fanhao': form, 'src': 'magnet'})
+                src, ev[idx] = 'ctx', scope
+        if not form and title and single:
+            form, scope = _inv_fanhao_from_ctx([title])        # B: 页面标题兜底(仅单链接页)
+            if form:
+                src, ev[idx] = 'title', 'title:' + scope
+        it.update({'fanhao': form, 'src': src})
+        out.append(it)
         if not form:
             it.update({'state': 'unknown', 'reason': 'no_fanhao'})
-            out.append(it)
             continue
-        out.append(it)
-        need.append((len(out) - 1, form))
-    req = _inv_query_many(need, out)
+        pend.append((idx, form))
+
+    # 跨条查重 (B 防呆): 同一段证据文本供出 ≥2 条不同磁链 → 那是合集帖的公共文本
+    # (标题/正文), 不可能是每一条各自的番号 → 该番号作废, 相关条退回 ⚠️。
+    # 两头都对: 12 行各带各的番号 → 证据文本互不相同 → 不误杀;
+    #           一个标题番号罩 12 条 → 12 个 hash 挤在同一组 → 全杀 (宁可 ⚠️ 不要假 ✅)。
+    if ev:
+        shared = {}
+        for idx, scope in ev.items():
+            shared.setdefault((out[idx]['fanhao'], scope), set()).add(out[idx]['link_hash'])
+        for idx, scope in ev.items():
+            if len(shared.get((out[idx]['fanhao'], scope), ())) > 1:
+                out[idx].update({'fanhao': '', 'src': '',
+                                 'state': 'unknown', 'reason': 'no_fanhao'})
+        pend = [(i, f) for (i, f) in pend if out[i].get('state') != 'unknown']
+
+    # A: 番号命中台账 → 0 请求直答 (番号级证据, 与 115 实搜同层级: 只证明这个番号入过库)
+    query = []
+    for idx, form in pend:
+        if _fanhao_key(form) in f2done:
+            out[idx].update({'state': 'in', 'checked': 'ledger_fanhao'})
+        else:
+            query.append((idx, form))
+    req = _inv_query_many(query, out)
     return {'items': out, 'req_115': req,
             'elapsed_ms': int((time.time() - t0) * 1000),
             'counts': {
                 'in': len([o for o in out if o.get('state') == 'in']),
                 'out': len([o for o in out if o.get('state') == 'out']),
                 'unknown': len([o for o in out if o.get('state') == 'unknown']),
-            }}
+            },
+            'ledger': {'f2done': len(f2done), 'done': len(done)}}
 
 
 class ImportHTTPServer(ThreadingHTTPServer):
@@ -5040,8 +5168,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/import/lookup':
             # 磁链库存反查 (v1.13.0, 2026-09-21): 油猴面板徽章"这条磁链在不在我 115 里"。
             # body: {"links": ["magnet:?xt=urn:btih:...", "ed2k://|file|...|"]}  ← 整个帖子的磁链一次带走
+            # v1.14.0 起再加帖子上下文 (与入库 /api/import/batch 同一份来源):
+            #   {"title": "SNOS-403 …", "thread_id": 123, "thread_url": "...",
+            #    "contexts": [["就近文本","上一层","再上一层"], ...]}   ← 与 links 严格同序
+            #   裸磁链 (没有 &dn=) 靠它抠番号, 否则只能显示 ⚠️ 未校验。
             # 响应: {"items":[{link, link_hash, fanhao, state: in|out|unknown, count, video, dir,
-            #                  reason?, checked?, cached?}], "req_115": n, "counts": {...}, "elapsed_ms": n}
+            #                  reason?, checked?, src?, cached?}], "req_115": n, "counts": {...}}
             # 三态语义见 inventory_lookup 顶部注释 —— unknown 绝不等于"不在库"。
             try:
                 length = int(self.headers.get('Content-Length', 0))
@@ -5049,7 +5181,14 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({'error': 'bad json: ' + str(e)}, 400)
                 return
-            res = inventory_lookup(body.get('links') or [])
+            res = inventory_lookup(
+                body.get('links') or [],
+                title=body.get('title') or '',
+                thread_id=body.get('thread_id') or '',
+                thread_url=body.get('thread_url') or '',
+                contexts=_inv_clean_ctxs(body.get('contexts')),
+                single=body.get('single'),
+            )
             self._json(res, 400 if res.get('error') else 200)
             return
         if path == '/api/import/adopt':
