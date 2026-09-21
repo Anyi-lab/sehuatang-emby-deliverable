@@ -47,7 +47,8 @@ sehuatang-emby-deliverable/
 │   ├── userscript/
 │   │   └── sehuatang_import.user.js # 油猴脚本（浏览器端，脱敏）
 │   └── server/
-│       ├── import_api.py            # 入库核心 API 服务（5081，脱敏）
+│       ├── import_api.py            # 入库核心 API 服务（5081，脱敏；含 /api/import/lookup 库存反查）
+       ├── mcp115.py                # 115 网盘 MCP 客户端（离线下载/列目录/搜索反查，脱敏）
 │       ├── scrape_sehuatang.py      # 网页刮削器（nfo/图片生成，脱敏）
 │       ├── fs115.py                 # 115 文件系统封装（CD2 后端，脱敏）
 │       ├── cd2grpc.py               # CD2 gRPC 客户端（离线下载/列目录，脱敏）
@@ -91,6 +92,7 @@ sehuatang-emby-deliverable/
 - ✅ 浏览器端元数据补充（手动选图、海报标记、多图轮播）
 - ✅ 115 限频感知与自动恢复（770004 风控闭环）
 - ✅ Emby 删除联动（删条目同时清理 115 目录，保持一致性）
+- ✅ 磁链库存反查（帖子页导航面板直接标 ✅在库 / ❓不在库 / ⚠️未校验，避免重复入库）
 
 ---
 
@@ -146,6 +148,7 @@ MEDIA_SERVER_TOKEN=08ba...2b54
 ```bash
 python3 src/server/import_api.py --media-check        # 逐台打印 家族/前缀/扫库返回码/UserId/路由
 python3 tests/media_server_stub_test.py              # 离线回归：3 个 stub 服务器，25 项断言
+python3 tests/inventory_lookup_stub_test.py          # 离线回归：库存反查，stub 掉 115 搜索，51 项断言
 ```
 
 回归测试覆盖的三种后端形态：
@@ -157,6 +160,17 @@ python3 tests/media_server_stub_test.py              # 离线回归：3 个 stub
 ```
 
 回退链：某台完全不可达时**不阻塞**入库 —— 广播里任一台返回 204 即算成功，全失败才记 warning。
+
+库存反查（帖子页导航面板的 ✅/❓/⚠️ 徽章）想手工验证一条链接，直接打接口即可：
+
+```bash
+curl -s -X POST http://127.0.0.1:5081/api/import/lookup \
+  -H 'Content-Type: application/json' \
+  -d '{"links":["magnet:?xt=urn:btih:xxxx&dn=SNOS-400.mp4"]}' | python3 -m json.tool
+```
+
+`state` 只会是 `in`（在库）/ `out`（搜不到）/ `unknown`（没查成，含 `reason`）。
+`unknown` **不等于**“不在库”，前端也绝不这么显示。详见 `docs/03-使用方法.md`。
 
 ---
 *本材料由 QwenPaw 整理，用于项目交流展示。*

@@ -740,6 +740,10 @@ def save_task(task_id, **kw):
     except Exception:
         pass
     c.commit(); c.close()
+    # 库存徽章缓存失效 (2026-09-21): 入库成功 → 让面板上该番号的 ❓ 立刻翻 ✅ (不等 TTL)。
+    # 只在该任务的番号上失效, 不做全清 (全清会让下次打开帖子页重新把 115 打满)。
+    if kw.get('status') == 'done' and _INV_CACHE:
+        _inv_invalidate(task_id)
 
 def get_task(task_id):
     c = sqlite3.connect(LOG_DB)
@@ -4461,7 +4465,285 @@ def render_tasks_page(category_map=None, default_category=DEFAULT_CATEGORY):
     return (TASKS_PAGE
             .replace('__CATS_JSON__', json.dumps(cats, ensure_ascii=False)))
 
+# ============================== 磁链库存反查 (v1.13.0, 2026-09-21) ==============================
+# 目标: 油猴面板上直接答"这条磁链的东西在我 115 里有没有" —— 不碰 9p 扫盘, 不等刮削入库, 不读 Emby。
+#
+# 数据源优先级 (越靠前越省钱):
+#   ① 本地台账 hash→番号            0 请求
+#   ② 本地台账 status='done' 直判在库 0 请求   ← 老帖整页可能一次 115 请求都不发
+#      (排除 status='deleted' —— 用户明确删过那份内容, 台账不再可信, 必须回落实搜)
+#   ③ 115 search_files 全盘搜番号     N 请求 (带缓存/并发/分片/限频护栏)
+#
+# 三态是核心 (静默假阴性防护, 与 2026-09-13 "MCP 掉线致 4 条任务推送失败" 同型):
+#   in      在库   —— 搜到 ≥1 条且番号二次校验通过; 或台账里该 hash 已 done
+#   out     不在库 —— search 干净返回 0 条 (不是 None)
+#   unknown 未校验 —— MCP 掉线/超时(None) / 限频窗口内 / 番号没解析出来
+#   ！！unknown 绝不可渲染成"不在库": MCP 一掉线全页显示"不在库"会让用户重复入库。
+INV_TTL_IN_S    = 600   # 在库/命中结果缓存 10 分钟
+INV_TTL_OUT_S   = 180   # 不在库缓存 3 分钟 (刚入库完要能马上翻牌)
+INV_CONCURRENCY = 6     # 并发上限 (实测 10 路并发 3.13s 全成功, 不顶格)
+INV_CHUNK       = 10    # 每片 ≤10 个番号
+INV_CHUNK_GAP_S = 1.5   # 片间隔: 峰值从 3.1 req/s 压到 ~1 req/s
+INV_LIMIT       = 30    # search limit (tool schema 默认 100, 白拉 3 倍数据)
+INV_MAX_LINKS   = 40    # 单次请求最多反查几条磁链
+INV_MAP_TTL_S   = 30    # 台账 hash→番号 映射重建间隔
+
+_INV_CACHE = {}          # fanhao_key -> (ts, item)  查询结果缓存
+_INV_CACHE_LOCK = threading.Lock()
+# h2f: infohash->番号; done: 已成功入库; gone: 已被删除(台账不可信, 必须问 115 实测)
+_INV_MAP = {'ts': 0.0, 'h2f': {}, 'done': set(), 'gone': set()}
+_INV_MAP_LOCK = threading.Lock()
+
+
+def _inv_hash(link):
+    """链接唯一 hash (magnet→btih / ed2k→32hex)。惰性 import, 与项目既有风格一致。"""
+    from mcp115 import MCP115
+    return MCP115.link_hash(link)
+
+
+def _inv_search_form(fanhao):
+    """把抠出来的番号整成【带横线】的搜索形式: SNOS400 -> SNOS-400。
+
+    实测 (2026-09-21): 搜 'SNOS400'(不带横线) 干净返回 0 条 → 搜索词必须带横线。
+    不能拿 _fanhao_key() 去搜: 它故意吃掉横线和前导零 (VRKM-01741 → VRKM1741),
+    那是【比对】用的归一键, 当搜索词用必然搜不到。
+    """
+    m = re.match(r'^([A-Za-z]{2,8})-?(\d{2,6})$', str(fanhao or '').strip())
+    return (m.group(1) + '-' + m.group(2)).upper() if m else ''
+
+
+def _inv_extract_fanhao(text):
+    """从标题/文件名抠出第一个番号候选。
+
+    _FANHAO_RE 允许无横线 (SNOS400 能抠出来), 这里统一整成带横线形式。
+    纯数字关键词是垃圾场 (实测搜 400 → 30 条 MDBK-400/MJAD-400), 所以必须带字母前缀。
+    """
+    for m in _FANHAO_RE.finditer(str(text or '').upper()):
+        f = _inv_search_form(m.group(1))
+        if f:
+            return f
+    return ''
+
+
+def _inv_fanhao_from_link(link):
+    """从磁链/ed2k 链接本身抠番号 —— 只扫文件名部分。
+
+    不要直接对整条 magnet 串跑正则: btih 的 16 进制尾巴 (…AB1234&dn=) 会长得像番号。
+    """
+    s = str(link or '')
+    m = re.search(r'[?&]dn=([^&\s]+)', s)
+    if m:
+        try:
+            s = urllib.parse.unquote(m.group(1))
+        except Exception:
+            s = m.group(1)
+    elif s.lower().startswith('ed2k://'):
+        m2 = re.match(r'ed2k://\|file\|([^|]*)', s)
+        s = m2.group(1) if m2 else ''
+    else:
+        s = ''
+    return _inv_extract_fanhao(s)
+
+
+def _inv_ledger_map():
+    """本地台账映射 (0 请求): infohash→番号, 已成功入库的 infohash, 已被删除的 infohash。
+
+    355 行台账全扫 <10ms, 30s 重建一次。实测 257/355 (72%) 的磁链在这里就能拿到番号。
+    被排除在"直答在库"之外的两种:
+      - status='failed'  该 hash 从未成功入库
+      - status='deleted' 用户明确删过这份内容 (台账现存 16 条, 全是"VR 已删除(无 VR 设备)")
+        → 台账不再可信, 必须回落到 115 实搜
+    """
+    now = time.time()
+    with _INV_MAP_LOCK:
+        if now - _INV_MAP['ts'] < INV_MAP_TTL_S:
+            return _INV_MAP['h2f'], _INV_MAP['done'], _INV_MAP['gone']
+    h2f, done, gone = {}, set(), set()
+    try:
+        c = sqlite3.connect(LOG_DB)
+        for magnet, title, status in c.execute('SELECT magnet, title, status FROM import_log'):
+            h = _inv_hash(magnet)
+            if not h:
+                continue
+            if status == 'done':
+                done.add(h)
+            elif status == 'deleted':
+                gone.add(h)
+            f = _inv_extract_fanhao(title) or _inv_fanhao_from_link(magnet)
+            if f:
+                h2f[h] = f
+        c.close()
+    except Exception as e:
+        log.warning('[inv] 台账映射构建失败: %s', str(e)[:150])
+    with _INV_MAP_LOCK:
+        _INV_MAP.update({'ts': now, 'h2f': h2f, 'done': done, 'gone': gone})
+    return h2f, done, gone
+
+
+def _inv_hit_matches(name, key):
+    """命中项是否真是这个番号: 抠出名字里的番号候选, 用 _fanhao_key 归一化比对。
+
+    搜索是模糊的 —— 实测搜 SNOS-400 会返回 SNOS-403 / SNOS-406-U,
+    裸子串或不校验必然误判"在库"。
+    """
+    for m in _FANHAO_RE.finditer(os.path.splitext(str(name or ''))[0].upper()):
+        if _fanhao_key(m.group(1)) == key:
+            return True
+    return False
+
+
+def _inv_verdict(form, res):
+    """把 search 结果判成三态里的 in/out (res 必须非 None)。
+
+    实测返回结构: list[dict]; 文件带 sha1/file_size/ico, 目录只带 file_id/file_name/parent_id/pick_code。
+    所以 is_dir 靠"没有 sha1"判定 (目录名恰是番号也算在库证据, 覆盖"文件名不含番号"的漏判)。
+    """
+    key = _fanhao_key(form)
+    hits = [e for e in (res or []) if _inv_hit_matches((e or {}).get('file_name', ''), key)]
+    return {'fanhao': form, 'state': 'in' if hits else 'out', 'checked': '115',
+            'count': len(hits),
+            'video': len([e for e in hits if e.get('sha1')]),
+            'dir': any(not e.get('sha1') for e in hits)}
+
+
+def _inv_cache_get(form):
+    key = _fanhao_key(form)
+    with _INV_CACHE_LOCK:
+        hit = _INV_CACHE.get(key)
+    if not hit:
+        return None
+    ttl = INV_TTL_IN_S if (hit[1] or {}).get('state') == 'in' else INV_TTL_OUT_S
+    if time.time() - hit[0] > ttl:
+        return None
+    c = dict(hit[1])
+    c['cached'] = True
+    return c
+
+
+def _inv_cache_put(form, item):
+    with _INV_CACHE_LOCK:
+        _INV_CACHE[_fanhao_key(form)] = (time.time(), dict(item))
+
+
+def _inv_invalidate(task_id):
+    """入库成功 → 立刻让库存徽章从 ❓ 翻 ✅ (不等 TTL), 并让台账映射重建。
+
+    只失效该任务对应的番号, 不做全清 —— 全清会让下一次打开帖子页重新把 115 打满。
+    """
+    try:
+        t = get_task(task_id) or {}
+        for f in (_inv_extract_fanhao(t.get('title')), _inv_fanhao_from_link(t.get('magnet'))):
+            if f:
+                with _INV_CACHE_LOCK:
+                    _INV_CACHE.pop(_fanhao_key(f), None)
+        with _INV_MAP_LOCK:
+            _INV_MAP['ts'] = 0.0
+    except Exception:
+        pass
+
+
+def _inv_query_many(pairs, out):
+    """并发分片查 115, 结果写回 out[idx]; 返回实际发出的 115 请求数 (命中缓存的不计)。
+
+    实测: 单条 0.13~0.70s (avg 0.31s), 10 路并发 3.13s 全成功,
+    连续 40 请求无失败/无 770004 指纹/耗时零漂移。
+    """
+    if not pairs:
+        return 0
+    todo = []
+    for idx, form in pairs:
+        c = _inv_cache_get(form)
+        if c:
+            out[idx].update(c)
+        else:
+            todo.append((idx, form))
+    if not todo:
+        return 0
+    if _ratelimit_active():
+        # 限频窗口内一个请求都不发 (复用既有护栏: /tmp/115push_ratelimit_state.json 新鲜且 limited)
+        log.warning('[inv] 限频窗口内, %d 个番号跳过查询(记 unknown)', len(todo))
+        for idx, _f in todo:
+            out[idx].update({'state': 'unknown', 'reason': 'ratelimit'})
+        return 0
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from mcp115 import MCP115
+    m = MCP115()
+    req = 0
+    for s in range(0, len(todo), INV_CHUNK):
+        if s:
+            time.sleep(INV_CHUNK_GAP_S)   # 片间间隔, 压峰值
+        chunk = todo[s:s + INV_CHUNK]
+        with ThreadPoolExecutor(max_workers=min(INV_CONCURRENCY, len(chunk))) as ex:
+            futs = {ex.submit(m.search_files, f, INV_LIMIT): (i, f) for i, f in chunk}
+            for fu in as_completed(futs):
+                idx, form = futs[fu]
+                try:
+                    res = fu.result()
+                except Exception as e:
+                    log.warning('[inv] search 异常 %s: %s', form, str(e)[:120])
+                    res = None
+                req += 1
+                if res is None:
+                    # MCP 掉线/超时 —— 绝不当成"不在库"; 且不落缓存 (瞬时故障不该被钉 3 分钟)
+                    log.warning('[inv] %s 查询无响应 → unknown (MCP 掉线/超时)', form)
+                    out[idx].update({'state': 'unknown', 'reason': 'mcp_down'})
+                    continue
+                item = _inv_verdict(form, res)
+                out[idx].update(item)
+                _inv_cache_put(form, item)
+    return req
+
+
+def inventory_lookup(links):
+    """磁链批量库存反查 (POST /api/import/lookup)。
+
+    入参: ['magnet:?xt=urn:btih:...', 'ed2k://|file|...']  (≤ INV_MAX_LINKS 条)
+    出参: {'items': [与入参同序], 'req_115': 实际发出的 115 请求数, 'elapsed_ms': n}
+    item: {link, link_hash, fanhao, state: in|out|unknown, reason?, checked?,
+           count, video, dir, cached?}
+    state=unknown 时 reason ∈ {no_fanhao, mcp_down, ratelimit} —— 前端必须按"未校验"渲染。
+    """
+    if not isinstance(links, list):
+        return {'error': 'links 必须是数组'}
+    links = [str(x).strip() for x in links if str(x or '').strip()][:INV_MAX_LINKS]
+    if not links:
+        return {'items': [], 'req_115': 0, 'elapsed_ms': 0}
+    t0 = time.time()
+    h2f, done, gone = _inv_ledger_map()
+    out, need = [], []
+    for link in links:
+        h = _inv_hash(link)
+        form = h2f.get(h, '') if h else ''
+        it = {'link': link, 'link_hash': h, 'fanhao': form, 'state': '',
+              'src': 'ledger' if form else ''}
+        if h and h in done and h not in gone:
+            # 台账里这条 hash 已成功入库过, 且没被删过 → 0 请求直答
+            # (不要求解析出番号: 前端按 link_hash 挂徽章, 番号只是附带的展示信息)
+            it.update({'state': 'in', 'checked': 'ledger'})
+            out.append(it)
+            continue
+        if not form:
+            form = _inv_fanhao_from_link(link)
+            if form:
+                it.update({'fanhao': form, 'src': 'magnet'})
+        if not form:
+            it.update({'state': 'unknown', 'reason': 'no_fanhao'})
+            out.append(it)
+            continue
+        out.append(it)
+        need.append((len(out) - 1, form))
+    req = _inv_query_many(need, out)
+    return {'items': out, 'req_115': req,
+            'elapsed_ms': int((time.time() - t0) * 1000),
+            'counts': {
+                'in': len([o for o in out if o.get('state') == 'in']),
+                'out': len([o for o in out if o.get('state') == 'out']),
+                'unknown': len([o for o in out if o.get('state') == 'unknown']),
+            }}
+
+
 class ImportHTTPServer(ThreadingHTTPServer):
+
     """2026-09-13: 单线程 HTTPServer → 多线程。
 
     事故: HTTPServer(socketserver.TCPServer) 一次只处理一个连接。当 Windows 侧
@@ -4753,6 +5035,21 @@ class Handler(BaseHTTPRequestHandler):
                                dry_run=bool(body.get('dry_run')),
                                thread_id=body.get('thread_id'), title=body.get('title'),
                                thread_url=body.get('thread_url'))
+            self._json(res, 400 if res.get('error') else 200)
+            return
+        if path == '/api/import/lookup':
+            # 磁链库存反查 (v1.13.0, 2026-09-21): 油猴面板徽章"这条磁链在不在我 115 里"。
+            # body: {"links": ["magnet:?xt=urn:btih:...", "ed2k://|file|...|"]}  ← 整个帖子的磁链一次带走
+            # 响应: {"items":[{link, link_hash, fanhao, state: in|out|unknown, count, video, dir,
+            #                  reason?, checked?, cached?}], "req_115": n, "counts": {...}, "elapsed_ms": n}
+            # 三态语义见 inventory_lookup 顶部注释 —— unknown 绝不等于"不在库"。
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = json.loads(self.rfile.read(length).decode('utf-8', 'replace')) if length else {}
+            except Exception as e:
+                self._json({'error': 'bad json: ' + str(e)}, 400)
+                return
+            res = inventory_lookup(body.get('links') or [])
             self._json(res, 400 if res.get('error') else 200)
             return
         if path == '/api/import/adopt':
