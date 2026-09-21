@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         色花堂链接级一键入库(逐条磁力/ed2k) + 元数据补充
 // @namespace    sehuatang-import
-// @version      1.13.0
+// @version      1.14.0
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @source       https://github.com/Anyi-lab/sehuatang-emby-deliverable
-// @description  色花堂链接级一键入库(逐条磁力/ed2k)。每条链接手工选择类型: "番号"=影片(推→等→清小文件→strm→MDC刮削→Emby刷新→预热; MDC失败/不完整由油猴📤补充); "非番号"=剧集(推→等→重命名thread_xxx_S01E01..→SmartStrm生成strm→油猴📤补充元数据→Emby刷新+预热, 即使1个视频也是剧集)。左上角磁力导航面板列出全部链接可点击快速滚动定位。v1.6.3: 修复手机版磁力被 <wbr>/<br> 等空元素拆成多段文本节点导致的漏识别(全文本拼接兜底+iframe兜底); v1.7.0: 新增手动输入磁力/ed2k链接入库对话框(导航面板✏️按钮, 支持多条, 提交到当前thread); v1.8.0: 新增元数据补充——提取帖子标题/简介/图片, 由本机浏览器下载图片后上传服务器生成 Emby 海报与简介 (导航面板📤按钮); v1.8.1: 元数据图片抓取优化——只抓静态图片(jpg/png等, 排除gif/webp/svg/ico), 懒加载取真实地址(data-original/data-src), 像素尺寸过滤(太小的表情/图标/头像不抓, 超高清原图不抓); v1.8.2: 描述同步新流程(去MySQL, 剧集文件名 thread_xxx_S01E01, MDC失败/剧集均待油猴补充元数据); v1.8.3: API_BASE 改 http(未配https), 悬浮面板新增📋一键跳转任务监控页按钮; v1.8.4: 手机版图片识别兼容——Discuz 附件真实地址 file/zoomfile 属性、选择器抓不到时全量图片兜底、iframe 内正文跨框架收集、相对路径补全域名; v1.8.7: 简介提取终极兜底——按"含磁力/ed2k 链接的文本节点"定位正文容器(色花堂正文必含下载链接, 不受模板类名影响), 简介提取失败时面板显示具体原因。 v1.9.0: 图片改为用户手工选择(候选图网格点选, 支持动图gif/webp/avif, 最多9张), 已选支持📌海报/↑↓调序/✕移除, 上传保留原图格式(mime)不再强制jpg, 移动端触控优化。 v1.9.1: 候选图排除小尺寸表情/图标(像素<200或未加载时CSS尺寸<100x80), 恢复表情/笑脸区域跳过。 v1.9.2: 标题清洗——去掉发布者/来源前缀标记(自转/115ED2K等, 保留【Omar盘点】类系列名), 去掉体积/配额后缀【1.87G/25P+18V/1配额】, 去掉尾部分区与论坛后缀(- 综合讨论区 - 98堂[原色花堂])。 v1.9.5: 磁力导航面板每条磁力新增📋复制按钮(复制完整干净链接含&dn), 标签优先显示文件名; v1.9.6: 取消正文磁力链接旁"🎬入库"按钮(避免页面出现两个入库), 改为磁力导航面板每条磁力🚀一键入库(点🚀选类型: 番号/非番号); // ==UserScript==; v1.9.10: 磁力规则参考 JAV-FORUM——支持 32位 base32 磁力hash(原仅40位hex), ed2k 要求文件名非空(空文件名ed2k拒绝); v1.11.0: 新增批量入库(导航面板⚡按钮)——一次提交本页全部(或勾选)磁力/ed2k: 按行类型分组调 /api/import/batch(每组超100条自动分批), 支持👁dry-run预览、提交后并发轮询进度、面板关闭后头部保留进度徽章, 不再逐条点🚀逐条等, 顺带修掉面板/弹层内的磁力文本被 collectLinks 误收进导航列表; v1.11.1: 悬浮导航面板默认落位改到画面左上角(标题栏仍可拖动, 拖走后仅本次会话生效); v1.12.0: 面板头部重排为两行(标题行 + 工具条), 工具条四个按钮带文字均分宽, 标题不再被挤成两行、按钮不再顶出边界; 拖动后的落位用 GM 存储记住(刷新/翻页仍在原地, 越界自动收回画面内), 双击标题行复位到左上角; v1.13.0: 导航面板每条链接显示 115 库存徽章 ✅在库/❓不在库/⚠️未校验 (打开帖子页自动反查一次, 服务端缓存+分片, MCP 掉线一律显示"未校验"绝不当成"不在库")
+// @description  色花堂链接级一键入库(逐条磁力/ed2k)。每条链接手工选择类型: "番号"=影片(推→等→清小文件→strm→MDC刮削→Emby刷新→预热; MDC失败/不完整由油猴📤补充); "非番号"=剧集(推→等→重命名thread_xxx_S01E01..→SmartStrm生成strm→油猴📤补充元数据→Emby刷新+预热, 即使1个视频也是剧集)。左上角磁力导航面板列出全部链接可点击快速滚动定位。v1.6.3: 修复手机版磁力被 <wbr>/<br> 等空元素拆成多段文本节点导致的漏识别(全文本拼接兜底+iframe兜底); v1.7.0: 新增手动输入磁力/ed2k链接入库对话框(导航面板✏️按钮, 支持多条, 提交到当前thread); v1.8.0: 新增元数据补充——提取帖子标题/简介/图片, 由本机浏览器下载图片后上传服务器生成 Emby 海报与简介 (导航面板📤按钮); v1.8.1: 元数据图片抓取优化——只抓静态图片(jpg/png等, 排除gif/webp/svg/ico), 懒加载取真实地址(data-original/data-src), 像素尺寸过滤(太小的表情/图标/头像不抓, 超高清原图不抓); v1.8.2: 描述同步新流程(去MySQL, 剧集文件名 thread_xxx_S01E01, MDC失败/剧集均待油猴补充元数据); v1.8.3: API_BASE 改 http(未配https), 悬浮面板新增📋一键跳转任务监控页按钮; v1.8.4: 手机版图片识别兼容——Discuz 附件真实地址 file/zoomfile 属性、选择器抓不到时全量图片兜底、iframe 内正文跨框架收集、相对路径补全域名; v1.8.7: 简介提取终极兜底——按"含磁力/ed2k 链接的文本节点"定位正文容器(色花堂正文必含下载链接, 不受模板类名影响), 简介提取失败时面板显示具体原因。 v1.9.0: 图片改为用户手工选择(候选图网格点选, 支持动图gif/webp/avif, 最多9张), 已选支持📌海报/↑↓调序/✕移除, 上传保留原图格式(mime)不再强制jpg, 移动端触控优化。 v1.9.1: 候选图排除小尺寸表情/图标(像素<200或未加载时CSS尺寸<100x80), 恢复表情/笑脸区域跳过。 v1.9.2: 标题清洗——去掉发布者/来源前缀标记(自转/115ED2K等, 保留【Omar盘点】类系列名), 去掉体积/配额后缀【1.87G/25P+18V/1配额】, 去掉尾部分区与论坛后缀(- 综合讨论区 - 98堂[原色花堂])。 v1.9.5: 磁力导航面板每条磁力新增📋复制按钮(复制完整干净链接含&dn), 标签优先显示文件名; v1.9.6: 取消正文磁力链接旁"🎬入库"按钮(避免页面出现两个入库), 改为磁力导航面板每条磁力🚀一键入库(点🚀选类型: 番号/非番号); // ==UserScript==; v1.9.10: 磁力规则参考 JAV-FORUM——支持 32位 base32 磁力hash(原仅40位hex), ed2k 要求文件名非空(空文件名ed2k拒绝); v1.11.0: 新增批量入库(导航面板⚡按钮)——一次提交本页全部(或勾选)磁力/ed2k: 按行类型分组调 /api/import/batch(每组超100条自动分批), 支持👁dry-run预览、提交后并发轮询进度、面板关闭后头部保留进度徽章, 不再逐条点🚀逐条等, 顺带修掉面板/弹层内的磁力文本被 collectLinks 误收进导航列表; v1.11.1: 悬浮导航面板默认落位改到画面左上角(标题栏仍可拖动, 拖走后仅本次会话生效); v1.12.0: 面板头部重排为两行(标题行 + 工具条), 工具条四个按钮带文字均分宽, 标题不再被挤成两行、按钮不再顶出边界; 拖动后的落位用 GM 存储记住(刷新/翻页仍在原地, 越界自动收回画面内), 双击标题行复位到左上角; v1.13.0: 导航面板每条链接显示 115 库存徽章 ✅在库/❓不在库/⚠️未校验 (打开帖子页自动反查一次, 服务端缓存+分片, MCP 掉线一律显示"未校验"绝不当成"不在库"); v1.14.0: 库存反查带上帖子上下文(title/thread_id/contexts) —— 裸磁链(无 &dn=)也能从页面文本抠出番号, 不再一片⚠️; 服务端台账新增"番号→已入库"索引, 番号命中的 0 请求直答(MCP 掉线也答得出); 跨条查重防呆: 同一段文本供出≥2 条磁链(合集帖公共标题)则该番号作废, 宁缺勿错; 响应新增 src 字段说明番号来源, 控制台一行交代"115 请求数 + 番号来源分账"
 // @author       QwenPaw
 // @match        *://sehuatang.net/*
 // @match        *://sehuatang.org/*
@@ -1576,6 +1576,10 @@
     const INV_TTL_UNK_MS = 60 * 1000;       // unknown 只压 1 分钟: MCP 掉线/限频是瞬时的,
                                             // 压 10 分钟会让这一页一直停在"未校验"不自己恢复
     const INV_MAX = 40;         // 与服务端 INV_MAX_LINKS 对齐
+    const CTX_LEVELS = 5;       // 页面上下文往上爬几层 DOM (就近在最前, 与服务端"唯一候选"配合)
+                                // 色花堂的磁链在 div.blockcode>ol>li 里, 番号在同一帖的 td.t_f 里
+                                // —— li→ol→blockcode→t_f 已经是第 4 层, 所以至少要 4, 留 5 更稳
+    const CTX_MAX = 200;        // 每层文本截断 (与服务端 _inv_clean_ctxs 的 max_len 对齐)
     const invCache = new Map(); // norm -> { item, ts }
     function invExpired(rec, now) {
         const ttl = (rec.item && rec.item.state === 'unknown') ? INV_TTL_UNK_MS : INV_TTL_MS;
@@ -1583,7 +1587,7 @@
     }
     const INV_TXT = { in: '✅在库', out: '❓不在库', unknown: '⚠️未校验' };
     const INV_WHY = {
-        no_fanhao: '链接里没解析出番号, 无从反查',
+        no_fanhao: '链接里和页面文本里都没解析出番号, 无从反查',
         mcp_down: '115 MCP 无响应(掉线/超时), 本次未校验',
         ratelimit: '115 处于限频窗口, 本次未校验'
     };
@@ -1593,7 +1597,9 @@
         if (r.state === 'in') {
             const where = r.checked === 'ledger'
                 ? '入库台账: 这条磁链曾入库成功'
-                : '115 全盘搜索命中';
+                : (r.checked === 'ledger_fanhao'
+                    ? '入库台账: 这个番号已入库 (按番号匹配, 可能是另一条磁链推的)'
+                    : '115 全盘搜索命中');
             const n = r.count
                 ? ('命中 ' + r.count + ' 项' + (r.video ? (', 其中视频 ' + r.video + ' 个') : '') +
                    (r.dir ? ', 含同名目录' : ''))
@@ -1633,9 +1639,34 @@
     }
 
     // 只查缓存里没有的; > 40 条按片串行发 (服务端自己还有并发/分片/限频护栏)
+    // ===== 页面上下文 (v1.14.0, B 方案): 裸磁链没有 &dn=, 服务端抠不出番号 =====
+    // 从这条磁链所在的 DOM 位置往外爬, 就近 → 逐层放宽, 交给服务端"只认唯一候选"。
+    // 为什么必须剔掉自己: 磁链原文里的 btih hex 会被番号正则当成噪声, 混进候选就选不出唯一解。
+    function contextFor(it) {
+        const out = [];
+        const el = (it && it.el) || null;
+        if (!el || (el.isConnected === false)) return out;
+        const self = String((it && it.raw) || '').replace(/\s+/g, ' ').trim();
+        let node = el;
+        for (let i = 0; i < CTX_LEVELS && node && node !== document.body; i++, node = node.parentElement) {
+            let t = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+            if (self) t = t.split(self).join(' ');
+            t = t.replace(/\s+/g, ' ').trim();
+            if (t) out.push(t.slice(0, CTX_MAX));
+        }
+        // 页面级标题: 只在"本页只有这一条链接"时才敢带上 (12 条磁力共用一个标题必然串味,
+        // 服务端会按"同一段文本供出 ≥2 条磁链"把它整个作废)
+        if (items.length === 1) {
+            const sub = document.querySelector('#thread_subject') || document.querySelector('h1.ts');
+            const t2 = String((sub && (sub.innerText || sub.textContent)) || document.title || '')
+                .replace(/\s+/g, ' ').trim();
+            if (t2) out.push(t2.slice(0, CTX_MAX));
+        }
+        return out;
+    }
+
     function invQuery(norms) {
-        if (!INV_ON || !norms || !norms.length) return Promise.resolve();
-        const byNorm = new Map(items.map(i => [i.norm, i]));
+        if (!INV_ON || !norms || !norms.length) return Promise.resolve();        const byNorm = new Map(items.map(i => [i.norm, i]));
         // 顺手把过期项摘掉 (invRender 也做, 但那条路径不保证先跑), unknown 1 分钟就过期,
         // 所以 MCP 掉线/限频之后重渲染一次就能自己恢复, 不会永远停在"未校验"
         const want = norms.filter(n => {
@@ -1649,7 +1680,18 @@
             const chunk = list.slice(0, INV_MAX), rest = list.slice(INV_MAX);
             // 送 raw 而不是 norm: norm 丢掉了 &dn= 文件名, 服务端少了"从文件名抠番号"这条回退
             const links = chunk.map(n => ((byNorm.get(n) || {}).raw || n));
-            return api('POST', '/api/import/lookup', { links: links })
+            const ctxs = chunk.map(n => contextFor(byNorm.get(n) || {}));
+            // v1.14.0: 查库存和入库用同一份帖子上下文 —— 裸磁链的番号只能从页面文本抠。
+            // single 必须显式传: 41 条以上的帖子分片后第二片只剩 1 条, 服务端按长度猜
+            // 就会把整页标题套到它头上。
+            return api('POST', '/api/import/lookup', {
+                links: links,
+                title: document.title,
+                thread_id: getThreadId() || undefined,
+                thread_url: location.href,
+                contexts: ctxs,
+                single: items.length === 1
+            })
                 .then(res => {
                     const arr = (res && res.items) || [];
                     // unknown 也缓存, 但只有 1 分钟寿命 (见 INV_TTL_UNK_MS): 不缓存的话
@@ -1658,10 +1700,16 @@
                         if (arr[i]) invCache.set(n, { item: arr[i], ts: Date.now() });
                     });
                     invRender();
-                    if (res && res.req_115) {
-                        console.log('[sht] 库存反查: %d 条 | 实际 115 请求 %d 次 | %dms | %o',
-                                    arr.length, res.req_115, res.elapsed_ms, res.counts);
-                    }
+                    // 每轮都打一行: 番号来源分账 (magnet=链接自带 / ctx=页面上下文 / title=页面标题 /
+                    // ledger=台账 hash / ''=没抠出来)。核对"抠出来的是不是真番号"就看这里。
+                    const bySrc = {};
+                    arr.forEach(i => {
+                        const s = (i && i.src) || '(无)';
+                        (bySrc[s] = bySrc[s] || []).push((i && i.fanhao) || '-');
+                    });
+                    console.log('[sht] 库存反查: %d 条 | 115 请求 %d 次 | %dms | %o | 番号来源 %o',
+                                arr.length, (res && res.req_115) || 0, (res && res.elapsed_ms) || 0,
+                                (res && res.counts) || {}, bySrc);
                     return run(rest);
                 })
                 .catch(e => {

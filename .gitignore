@@ -7,3 +7,4 @@ import_log.db
 import_api.db
 *.bak-*
 *.bak*
+node_modules/
