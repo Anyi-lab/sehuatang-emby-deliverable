@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         色花堂链接级一键入库(逐条磁力/ed2k) + 元数据补充
 // @namespace    sehuatang-import
-// @version      1.14.1
+// @version      1.15.0
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/src/userscript/sehuatang_import.user.js
 // @source       https://github.com/Anyi-lab/sehuatang-emby-deliverable
-// @description  色花堂链接级一键入库(逐条磁力/ed2k)。每条链接手工选择类型: "番号"=影片(推→等→清小文件→strm→MDC刮削→Emby刷新→预热; MDC失败/不完整由油猴📤补充); "非番号"=剧集(推→等→重命名thread_xxx_S01E01..→SmartStrm生成strm→油猴📤补充元数据→Emby刷新+预热, 即使1个视频也是剧集)。左上角磁力导航面板列出全部链接可点击快速滚动定位。v1.6.3: 修复手机版磁力被 <wbr>/<br> 等空元素拆成多段文本节点导致的漏识别(全文本拼接兜底+iframe兜底); v1.7.0: 新增手动输入磁力/ed2k链接入库对话框(导航面板✏️按钮, 支持多条, 提交到当前thread); v1.8.0: 新增元数据补充——提取帖子标题/简介/图片, 由本机浏览器下载图片后上传服务器生成 Emby 海报与简介 (导航面板📤按钮); v1.8.1: 元数据图片抓取优化——只抓静态图片(jpg/png等, 排除gif/webp/svg/ico), 懒加载取真实地址(data-original/data-src), 像素尺寸过滤(太小的表情/图标/头像不抓, 超高清原图不抓); v1.8.2: 描述同步新流程(去MySQL, 剧集文件名 thread_xxx_S01E01, MDC失败/剧集均待油猴补充元数据); v1.8.3: API_BASE 改 http(未配https), 悬浮面板新增📋一键跳转任务监控页按钮; v1.8.4: 手机版图片识别兼容——Discuz 附件真实地址 file/zoomfile 属性、选择器抓不到时全量图片兜底、iframe 内正文跨框架收集、相对路径补全域名; v1.8.7: 简介提取终极兜底——按"含磁力/ed2k 链接的文本节点"定位正文容器(色花堂正文必含下载链接, 不受模板类名影响), 简介提取失败时面板显示具体原因。 v1.9.0: 图片改为用户手工选择(候选图网格点选, 支持动图gif/webp/avif, 最多9张), 已选支持📌海报/↑↓调序/✕移除, 上传保留原图格式(mime)不再强制jpg, 移动端触控优化。 v1.9.1: 候选图排除小尺寸表情/图标(像素<200或未加载时CSS尺寸<100x80), 恢复表情/笑脸区域跳过。 v1.9.2: 标题清洗——去掉发布者/来源前缀标记(自转/115ED2K等, 保留【Omar盘点】类系列名), 去掉体积/配额后缀【1.87G/25P+18V/1配额】, 去掉尾部分区与论坛后缀(- 综合讨论区 - 98堂[原色花堂])。 v1.9.5: 磁力导航面板每条磁力新增📋复制按钮(复制完整干净链接含&dn), 标签优先显示文件名; v1.9.6: 取消正文磁力链接旁"🎬入库"按钮(避免页面出现两个入库), 改为磁力导航面板每条磁力🚀一键入库(点🚀选类型: 番号/非番号); // ==UserScript==; v1.9.10: 磁力规则参考 JAV-FORUM——支持 32位 base32 磁力hash(原仅40位hex), ed2k 要求文件名非空(空文件名ed2k拒绝); v1.11.0: 新增批量入库(导航面板⚡按钮)——一次提交本页全部(或勾选)磁力/ed2k: 按行类型分组调 /api/import/batch(每组超100条自动分批), 支持👁dry-run预览、提交后并发轮询进度、面板关闭后头部保留进度徽章, 不再逐条点🚀逐条等, 顺带修掉面板/弹层内的磁力文本被 collectLinks 误收进导航列表; v1.11.1: 悬浮导航面板默认落位改到画面左上角(标题栏仍可拖动, 拖走后仅本次会话生效); v1.12.0: 面板头部重排为两行(标题行 + 工具条), 工具条四个按钮带文字均分宽, 标题不再被挤成两行、按钮不再顶出边界; 拖动后的落位用 GM 存储记住(刷新/翻页仍在原地, 越界自动收回画面内), 双击标题行复位到左上角; v1.13.0: 导航面板每条链接显示 115 库存徽章 ✅在库/❓不在库/⚠️未校验 (打开帖子页自动反查一次, 服务端缓存+分片, MCP 掉线一律显示"未校验"绝不当成"不在库"); v1.14.0: 库存反查带上帖子上下文(title/thread_id/contexts) —— 裸磁链(无 &dn=)也能从页面文本抠出番号, 不再一片⚠️; 服务端台账新增"番号→已入库"索引, 番号命中的 0 请求直答(MCP 掉线也答得出); 跨条查重防呆: 同一段文本供出≥2 条磁链(合集帖公共标题)则该番号作废, 宁缺勿错; 响应新增 src 字段说明番号来源, 控制台一行交代"115 请求数 + 番号来源分账" 【v1.14.1】库存反查: 当结果靠页面文本判定(或一条都没抠出番号)时, 控制台额外打印送给服务端的页面文本(由近到远), 用来核对抠出的番号是否为真。
+// @description  色花堂链接级一键入库(逐条磁力/ed2k)。每条链接手工选择类型: "番号"=影片(推→等→清小文件→strm→MDC刮削→Emby刷新→预热; MDC失败/不完整由油猴📤补充); "非番号"=剧集(推→等→重命名thread_xxx_S01E01..→SmartStrm生成strm→油猴📤补充元数据→Emby刷新+预热, 即使1个视频也是剧集)。左上角磁力导航面板列出全部链接可点击快速滚动定位。v1.6.3: 修复手机版磁力被 <wbr>/<br> 等空元素拆成多段文本节点导致的漏识别(全文本拼接兜底+iframe兜底); v1.7.0: 新增手动输入磁力/ed2k链接入库对话框(导航面板✏️按钮, 支持多条, 提交到当前thread); v1.8.0: 新增元数据补充——提取帖子标题/简介/图片, 由本机浏览器下载图片后上传服务器生成 Emby 海报与简介 (导航面板📤按钮); v1.8.1: 元数据图片抓取优化——只抓静态图片(jpg/png等, 排除gif/webp/svg/ico), 懒加载取真实地址(data-original/data-src), 像素尺寸过滤(太小的表情/图标/头像不抓, 超高清原图不抓); v1.8.2: 描述同步新流程(去MySQL, 剧集文件名 thread_xxx_S01E01, MDC失败/剧集均待油猴补充元数据); v1.8.3: API_BASE 改 http(未配https), 悬浮面板新增📋一键跳转任务监控页按钮; v1.8.4: 手机版图片识别兼容——Discuz 附件真实地址 file/zoomfile 属性、选择器抓不到时全量图片兜底、iframe 内正文跨框架收集、相对路径补全域名; v1.8.7: 简介提取终极兜底——按"含磁力/ed2k 链接的文本节点"定位正文容器(色花堂正文必含下载链接, 不受模板类名影响), 简介提取失败时面板显示具体原因。 v1.9.0: 图片改为用户手工选择(候选图网格点选, 支持动图gif/webp/avif, 最多9张), 已选支持📌海报/↑↓调序/✕移除, 上传保留原图格式(mime)不再强制jpg, 移动端触控优化。 v1.9.1: 候选图排除小尺寸表情/图标(像素<200或未加载时CSS尺寸<100x80), 恢复表情/笑脸区域跳过。 v1.9.2: 标题清洗——去掉发布者/来源前缀标记(自转/115ED2K等, 保留【Omar盘点】类系列名), 去掉体积/配额后缀【1.87G/25P+18V/1配额】, 去掉尾部分区与论坛后缀(- 综合讨论区 - 98堂[原色花堂])。 v1.9.5: 磁力导航面板每条磁力新增📋复制按钮(复制完整干净链接含&dn), 标签优先显示文件名; v1.9.6: 取消正文磁力链接旁"🎬入库"按钮(避免页面出现两个入库), 改为磁力导航面板每条磁力🚀一键入库(点🚀选类型: 番号/非番号); // ==UserScript==; v1.9.10: 磁力规则参考 JAV-FORUM——支持 32位 base32 磁力hash(原仅40位hex), ed2k 要求文件名非空(空文件名ed2k拒绝); v1.11.0: 新增批量入库(导航面板⚡按钮)——一次提交本页全部(或勾选)磁力/ed2k: 按行类型分组调 /api/import/batch(每组超100条自动分批), 支持👁dry-run预览、提交后并发轮询进度、面板关闭后头部保留进度徽章, 不再逐条点🚀逐条等, 顺带修掉面板/弹层内的磁力文本被 collectLinks 误收进导航列表; v1.11.1: 悬浮导航面板默认落位改到画面左上角(标题栏仍可拖动, 拖走后仅本次会话生效); v1.12.0: 面板头部重排为两行(标题行 + 工具条), 工具条四个按钮带文字均分宽, 标题不再被挤成两行、按钮不再顶出边界; 拖动后的落位用 GM 存储记住(刷新/翻页仍在原地, 越界自动收回画面内), 双击标题行复位到左上角; v1.13.0: 导航面板每条链接显示 115 库存徽章 ✅在库/❓不在库/⚠️未校验 (打开帖子页自动反查一次, 服务端缓存+分片, MCP 掉线一律显示"未校验"绝不当成"不在库"); v1.14.0: 库存反查带上帖子上下文(title/thread_id/contexts) —— 裸磁链(无 &dn=)也能从页面文本抠出番号, 不再一片⚠️; 服务端台账新增"番号→已入库"索引, 番号命中的 0 请求直答(MCP 掉线也答得出); 跨条查重防呆: 同一段文本供出≥2 条磁链(合集帖公共标题)则该番号作废, 宁缺勿错; 响应新增 src 字段说明番号来源, 控制台一行交代"115 请求数 + 番号来源分账" 【v1.14.1】库存反查: 当结果靠页面文本判定(或一条都没抠出番号)时, 控制台额外打印送给服务端的页面文本(由近到远), 用来核对抠出的番号是否为真。 【v1.15.0】批量入库面板每行直接显示库存徽章 ✅在库/❓不在库/⚠️未校验(与左上角面板同一套绘制入口, 打开弹窗时自己补查一次), 开弹窗时一眼看清哪条已在库,不用关掉弹窗回面板对照。
 // @author       QwenPaw
 // @match        *://sehuatang.net/*
 // @match        *://sehuatang.org/*
@@ -768,6 +768,7 @@
                     '<input type="checkbox" class="sht-batch-ck">' +
                     '<span class="sht-batch-idx">' + (idx + 1) + '</span>' +
                     '<span class="sht-batch-label" title="点击滚动定位到正文链接"></span>' +
+                    '<span class="sht-batch-inv" title=""></span>' +
                     '<button class="sht-batch-kbtn" data-kind="fanhao" title="本行按番号(电影)入库">番</button>' +
                     '<button class="sht-batch-kbtn" data-kind="non_fanhao" title="本行按非番号(剧集)入库">剧</button>' +
                     '<span class="sht-batch-res"></span>';
@@ -808,6 +809,8 @@
                 paintKind();
                 r.rowEl = row;
                 r.ck = ck;
+                // v1.15.0: 建行时就先用缓存里的库存结论画一次徽章 (没查过的等 invQuery 回来再补)
+                invPaint(row.querySelector('.sht-batch-inv'), r.it.norm, 'sht-batch-inv');
                 listBox.appendChild(row);
             });
         };
@@ -841,6 +844,11 @@
         renderRows();
         updateCount();
         renderProgress();
+
+        // v1.15.0: 弹窗里也要有库存结论 —— 先用缓存画一遍, 没查过的(过期/首开)补一次请求,
+        // 结果回来时 invQuery 内部会调 invRender, 弹窗行跟着一起翻。
+        invRender();
+        invQuery(batchRows.map(r => r.it.norm));
 
         // 顶部默认类型/分类
         batchMask.querySelectorAll('.sht-batch-kind').forEach(k => {
@@ -1615,27 +1623,41 @@
                (r.fanhao ? ('\n' + fh) : '') + '\n(点 🚀 仍可正常入库)';
     }
 
+    // 画一个徽章到指定元素 (v1.15.0): 面板行与批量弹窗行共用同一个口径 ——
+    // 两处各描一遍必然会描出两个说法 (面板说在库、弹窗说未校验), 所以只留这一个入口。
+    function invPaint(el, norm, baseCls, now) {
+        if (!el) return;
+        const rec = invCache.get(norm);
+        if (rec && invExpired(rec, now || Date.now())) { invCache.delete(norm); }
+        const cur = invCache.get(norm);
+        el.className = baseCls;                 // 顺手清掉上一次的三态 class
+        if (!cur || !cur.item || !INV_TXT[cur.item.state]) {
+            el.textContent = '';
+            el.removeAttribute('title');
+            return;
+        }
+        el.textContent = INV_TXT[cur.item.state];
+        el.classList.add(cur.item.state === 'in' ? 'inv-in'
+                       : (cur.item.state === 'out' ? 'inv-out' : 'inv-unk'));
+        el.title = invTitle(cur.item);
+    }
+
     function invRender() {
-        if (!navList) return;
         const now = Date.now();
-        navList.querySelectorAll('.sht-nav-item').forEach(row => {
-            const el = row.querySelector('.sht-nav-inv');
-            const it = items[Number(row.dataset.idx)];
-            if (!el || !it) return;
-            const rec = invCache.get(it.norm);
-            if (rec && invExpired(rec, now)) { invCache.delete(it.norm); }
-            const cur = invCache.get(it.norm);
-            el.className = 'sht-nav-inv';
-            if (!cur || !cur.item || !INV_TXT[cur.item.state]) {
-                el.textContent = '';
-                el.removeAttribute('title');
-                return;
-            }
-            el.textContent = INV_TXT[cur.item.state];
-            el.classList.add(cur.item.state === 'in' ? 'inv-in'
-                           : (cur.item.state === 'out' ? 'inv-out' : 'inv-unk'));
-            el.title = invTitle(cur.item);
-        });
+        if (navList) {
+            navList.querySelectorAll('.sht-nav-item').forEach(row => {
+                const it = items[Number(row.dataset.idx)];
+                if (it) invPaint(row.querySelector('.sht-nav-inv'), it.norm, 'sht-nav-inv', now);
+            });
+        }
+        // v1.15.0: 批量弹窗里的行也画上同一套徽章 —— 不必关闭弹窗回面板对照
+        if (batchMask) {
+            batchRows.forEach(r => {
+                if (r.rowEl && r.it) {
+                    invPaint(r.rowEl.querySelector('.sht-batch-inv'), r.it.norm, 'sht-batch-inv', now);
+                }
+            });
+        }
     }
 
     // 只查缓存里没有的; > 40 条按片串行发 (服务端自己还有并发/分片/限频护栏)
@@ -1872,6 +1894,12 @@
 .sht-nav-inv.inv-in{color:#4ade80}
 .sht-nav-inv.inv-out{color:#64748b}
 .sht-nav-inv.inv-unk{color:#fbbf24}
+/* v1.15.0: 批量弹窗行内同一套徽章 (在弹窗里就能看清哪条已在库, 不用回面板对照) */
+.sht-batch-inv{flex:none;font-size:11px;white-space:nowrap;cursor:help}
+.sht-batch-inv:empty{display:none}
+.sht-batch-inv.inv-in{color:#4ade80}
+.sht-batch-inv.inv-out{color:#64748b}
+.sht-batch-inv.inv-unk{color:#fbbf24}
 #sht-batch-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;background:#0b1220;border:1px solid #1e293b;border-radius:10px}
 .sht-batch-lbl{color:#94a3b8;font-size:12px}
 .sht-batch-kind{display:inline-block;padding:5px 12px;border:1px solid #334155;border-radius:8px;background:#1e293b;color:#e2e8f0;font-size:12px;cursor:pointer}
@@ -1901,6 +1929,7 @@
 #sht-batch-status.bad{color:#ef4444}
 @media (max-width:640px){
   .sht-batch-res{min-width:0}
+  .sht-batch-inv{font-size:10px}
   #sht-batch-list{max-height:38vh}
 }
 `;
