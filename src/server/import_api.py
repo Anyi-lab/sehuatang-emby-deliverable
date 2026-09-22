@@ -483,11 +483,7 @@ class Push115:
             ok, msg = self.add_task(link, savepath)
             if ok:
                 # 新增链接后同步本地缓存 (用户规则: 新增 ed2k/磁力要对应更新缓存)
-                try:
-                    from fs115 import _cache as _fs_cache
-                    _fs_cache().sync_path(savepath)
-                except Exception as e:
-                    log.warning('push 后缓存同步失败: %s', str(e)[:100])
+                _fs_cache_sync(savepath, tag='push 后')
                 return True, 'ok', None
             # "任务已存在" = 之前推送过 → 自动删除旧任务并重新推送
             # (用户规则: 遇到任务重复不要跳过, 直接删旧任务重推, 保证文件落地/清理/刮削全流程重走)
@@ -700,6 +696,32 @@ class Push115:
                 removed.append(rel)
             time.sleep(0.5)
         return kept, removed
+
+def _fs_cache_sync(savepath, tag=''):
+    """同步 115 目录缓存 (新增链接后调用)。返回 True=真做了同步, False=本环境无缓存(no-op)。
+
+    2026-09-22 修: 本地版 fs115._cache() 永远返回 None —— 这是刻意的降级占位
+    (见 fs115.py 顶部「本环境无 fs_cache 模块, 安全降级为无缓存」), 不是配置错误。
+    但老写法 `_fs_cache().sync_path(savepath)` 没判空, 每次都抛 AttributeError,
+    被 except 吞成一条 warning「push 后缓存同步失败: 'NoneType' object has no attribute
+    'sync_path'」(实测 2026-09-22 20:32 批量入库时刷了 7+ 条, 掩盖真故障)。
+    这里显式判空: 无缓存安静跳过, 只有真异常才告警。
+    """
+    try:
+        from fs115 import _cache as _fs_cache
+    except Exception as e:
+        log.warning('%s缓存模块导入失败: %s', tag, str(e)[:100])
+        return False
+    c = _fs_cache()
+    if c is None:
+        return False
+    try:
+        c.sync_path(savepath)
+        return True
+    except Exception as e:
+        log.warning('%s缓存同步失败: %s', tag, str(e)[:100])
+        return False
+
 
 # ============================== 任务记录 ==============================
 def init_log_db():
@@ -2148,6 +2170,41 @@ def parse_link_lines(raw, default_kind=None, default_category=None):
     return items, errors
 
 
+# 2026-09-22: 同链接防重 —— 面板重复点「批量入库」会把同一批链接建两遍任务。
+# 单条入库允许"删旧重推"(用户规则, 见 push_magnet), 但【同一时刻】两条任务跑同一条链接
+# 会互相删 115 离线任务: 实测 20:31 面板连点两次 → 28 条并发, 13 条被"任务已存在→删旧重推",
+# 白跑一轮且 MCP 会话被并发重建 (add_offline_download 无响应 xN)。
+# 规则: 建任务前查同 hash 是否已有 queued/running 任务; 有就跳过这一条, 不建第二个任务。
+# 副作用(有意): 同一链接"同时按两个分类入库"也会被跳过 —— 需等前一个跑完再提交另一分类。
+DUP_ACTIVE_WINDOW_S = int(os.environ.get('DUP_ACTIVE_WINDOW_S', '7200'))
+# ↑ 活跃任务的"新鲜"窗口, 防服务重启遗留的陈旧 running 永久误挡 (2h 覆盖 adopt 的 2h 上限)
+
+
+def _active_link_hashes(window_s=None):
+    """最近 window_s 秒内 queued/running 的任务: {链接hash: (task_id, status, step)}。
+
+    只读台账, 零 115 请求。查库失败时返回空 dict —— 宁可放过(旧行为)也不误挡用户提交。
+    """
+    window_s = int(window_s or DUP_ACTIVE_WINDOW_S)
+    out = {}
+    try:
+        c = sqlite3.connect(LOG_DB)
+        rows = c.execute(
+            "SELECT task_id, magnet, status, step FROM import_log "
+            "WHERE status IN ('queued','running') AND magnet != '' "
+            "AND updated_at >= datetime('now','localtime', ?)",
+            ('-%d seconds' % window_s,)).fetchall()
+        c.close()
+    except Exception as e:
+        log.warning('[dup] 查活跃任务失败, 本轮不做防重: %s', str(e)[:120])
+        return out
+    for tid, link, status, step in rows:
+        h = _inv_hash(link)
+        if h:
+            out.setdefault(h, (tid, status, step))
+    return out
+
+
 def batch_import(raw_links, default_kind=None, default_category=None, dry_run=False,
                  thread_id=None, title=None, thread_url=None):
     """批量解析 + 逐条建任务。dry_run=True 只回解析结果, 不入队。
@@ -2155,7 +2212,11 @@ def batch_import(raw_links, default_kind=None, default_category=None, dry_run=Fa
       不传的话 start_import 会退化成无帖上下文 —— 落点变成 /sehuatang/<分类>/manual_<hash8>
       (每条链接一个目录), 且 kind='non_fanhao' 走不到剧集模式(看 _run_import_dl 的 to_tv_mode)。
       面板批量提交时必须带帖上下文, 保证与单条入库完全同构: 同 thread_<tid> 落点 / 剧集模式 / 📤元数据能对上目录。
-    返回 {submitted, failed, skipped, items[], errors[]} 或 {'error': ...}"""
+    返回 {submitted, failed, skipped, dup_skipped, items[], duplicates[], errors[]} 或 {'error': ...}
+       skipped     = 解析阶段被跳过的行数 (重复行/不识别), 语义不变
+       dup_skipped = 查重跳过数 (2026-09-22): 同链接已有 queued/running 任务, 不重复建
+       duplicates  = 上面这些行的明细 [{line, raw, error, task_id}]
+    注意: dry_run 预览不做查重 (预览只反映解析结果, 不读台账)。"""
     if default_kind not in ('fanhao', 'non_fanhao'):
         return {'error': 'kind 必填, 只能是 fanhao(影片/番号) 或 non_fanhao(剧集/非番号)'}
     items, errors = parse_link_lines(raw_links, default_kind, norm_category(default_category))
@@ -2167,13 +2228,25 @@ def batch_import(raw_links, default_kind=None, default_category=None, dry_run=Fa
         m = re.search(r'thread-(\d+)', thread_url) or re.search(r'[?&]tid=(\d+)', thread_url)
         if m:
             tid = m.group(1)
-    out = []
+    out, duplicates = [], []
+    active = {} if dry_run else _active_link_hashes()   # {hash: (task_id, status, step)}
     for it in items:
         it['category'] = norm_category(it.get('category'))
         row = {'magnet': it['magnet'][:100], 'kind': it['kind'],
                'category': it['category'], 'line': it['line']}
         if dry_run:
             out.append(dict(row, ok=True, task_id=''))
+            continue
+        # 查重 (2026-09-22): 同链接已有任务在跑 → 跳过, 不建第二个任务
+        h = _inv_hash(it['magnet'])
+        hold = active.get(h) if h else None
+        if hold:
+            dtid, dst, dstep = hold
+            reason = '同链接已有任务在跑(%s/%s, %s), 已跳过' % (dst, dstep, dtid)
+            row.update(ok=False, task_id=dtid, skipped=True, skip_reason='dup_active', error=reason)
+            duplicates.append({'line': it['line'], 'raw': it['magnet'][:100],
+                               'error': reason, 'task_id': dtid})
+            out.append(row)
             continue
         try:
             row['task_id'] = start_import(magnet=it['magnet'], kind=it['kind'], category=it['category'],
@@ -2186,11 +2259,16 @@ def batch_import(raw_links, default_kind=None, default_category=None, dry_run=Fa
             log.exception('[batch] 建任务失败: %s', it['magnet'][:80])
         out.append(row)
     ok = sum(1 for r in out if r['ok'])
+    dup = len(duplicates)
     if not dry_run:
-        log.info('[batch] 提交 %d 条 (失败 %d, 跳过 %d, thread %s): %s', ok, len(out) - ok, len(errors),
-                 tid or '-', ', '.join(r['task_id'] for r in out if r['ok'])[:300])
-    return {'dry_run': bool(dry_run), 'submitted': ok, 'failed': len(out) - ok,
-            'skipped': len(errors), 'thread_id': tid, 'items': out, 'errors': errors}
+        log.info('[batch] 提交 %d 条 (失败 %d, 查重跳过 %d, 解析跳过 %d, thread %s): %s', ok,
+                 len(out) - ok - dup, dup, len(errors), tid or '-',
+                 ', '.join(r['task_id'] for r in out if r['ok'])[:300])
+        for d in duplicates:
+            log.info('[batch] 查重跳过: 第 %s 行 %s (%s)', d['line'], d['raw'][:70], d['error'])
+    return {'dry_run': bool(dry_run), 'submitted': ok, 'failed': len(out) - ok - dup,
+            'skipped': len(errors), 'dup_skipped': dup, 'thread_id': tid,
+            'items': out, 'duplicates': duplicates, 'errors': errors}
 
 
 # ============================== avdb adopt (2026-09-19) ==============================
@@ -2974,12 +3052,10 @@ def run_rescrape(task_id, thread_id, kind='web'):
             if vids:
                 break
             if _r < 3:
-                try:
-                    from fs115 import _cache as _fs_cache
-                    _fs_cache().sync_path(savepath)
+                if _fs_cache_sync(savepath, tag='[rescrape] '):
                     log.info('[rescrape] 视频读取为空, 已同步缓存(第%d次), 5s 后重试', _r + 1)
-                except Exception as e:
-                    log.warning('[rescrape] 缓存同步失败(第%d次): %s', _r + 1, str(e)[:100])
+                else:
+                    log.info('[rescrape] 视频读取为空, 第%d次重试(本地版无 115 目录缓存可同步)', _r + 1)
                 time.sleep(5)
         if not vids:
             save_task(task_id, status='failed', step='scrape',
