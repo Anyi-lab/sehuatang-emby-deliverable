@@ -5,7 +5,7 @@
   - 批量提交: 多行文本一行一条, 支持 magnet:?xt=urn:btih:… / ed2k:// / 裸 40 位 BTIH
   - 分类下拉: 值来自后端 CATEGORY_MAP 单一来源 (渲染时 __CATS_JSON__ 注入), 不再前端硬编码
   - 行尾 "#分类key" 可单条覆盖本批默认分类 (混批场景)
-  - 解析预览走 POST /api/import/batch?dry_run=1 (服务端同一套解析逻辑, 前端不重复实现)
+  - 解析预览走 POST /api/import/batch (body 里 dry_run:true; 服务端读 body, 不读 query), 服务端同一套解析逻辑
   - 批次进度: 每条独立轮询 /api/import/status, 记录落 localStorage 刷新不丢
   - 最近入库 + 队列统计: /api/import/list (10s 自动刷新)
 
