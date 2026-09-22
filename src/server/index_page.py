@@ -8,6 +8,12 @@
   - 解析预览走 POST /api/import/batch?dry_run=1 (服务端同一套解析逻辑, 前端不重复实现)
   - 批次进度: 每条独立轮询 /api/import/status, 记录落 localStorage 刷新不丢
   - 最近入库 + 队列统计: /api/import/list (10s 自动刷新)
+
+2026-09-22 防重 (用户实测: 面板连点两次 → 28 条并发建任务, 13 条白跑一轮):
+  - 前端: 同一批链接 60s 内重复提交直接拦 (指纹=排序后的链接 key+类型+分类, 落 localStorage,
+    关页面重开也拦); 全失败不记指纹, 允许立刻重试。
+  - 服务端: POST /api/import/batch 按链接 hash 查重, 同 hash 已有 queued/running 任务则跳过
+    (第二道兜底; 结果里回 dup_skipped + duplicates[] 明细)。
 """
 
 import json
@@ -218,6 +224,7 @@ let pollTimers = {};       // task_id -> interval
 let batch = [];            // 本批记录 [{task_id, link, kind, cat, ts, ok, error}]
 let previewItems = [], previewErrors = [], previewTimer = null, lastParsedText = '';
 let submitBusy = false;
+let lastSubmit = null;     // {fp, ts, n} 上一批成功提交的指纹 (前端防重, 见 dupGuard*)
 
 /* ---------- 小工具 ---------- */
 function esc(s){return (s==null?'':String(s)).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
@@ -326,6 +333,47 @@ function lightLive(){   /* 极轻量即时计数(不解析语义), 权威结果�
   document.getElementById('live').innerHTML = '输入 <b>'+n+'</b> 行…';
 }
 
+/* ---------- 防重: 同一批链接 60 秒内重复提交直接拦 (2026-09-22) ----------
+   背景: 面板连点两次「批量入库」→ 服务端把同一批链接建两遍任务; 同链接两条任务并发跑
+   会互相删 115 离线任务 (实测 20:31 连点 → 28 条并发, 13 条白跑一轮 + MCP 会话被争抢)。
+   服务端 /api/import/batch 已按 hash 查重兜底(第二道), 这里是第一道: 60s 窗口内同指纹
+   直接在浏览器拦住, 请求都不发。指纹 = 排序后的链接规范化 key + 类型 + 分类。
+   落 localStorage: 手滑关页面重开也拦得住。 */
+const DUP_GUARD_MS = 60000;
+const LS_LAST_SUBMIT = 'sehuatang_last_submit';
+function linkDedupKey(line){
+  const s = String(line||'').trim();
+  let m = s.match(/btih:([0-9a-fA-F]{32,40})/);
+  if(m) return 'bt:' + m[1].toLowerCase();
+  if(/^[0-9a-fA-F]{40}$/.test(s)) return 'bt:' + s.toLowerCase();
+  m = s.match(/ed2k:\/\/\|file\|[^|]*\|\d+\|([0-9a-fA-F]{32})\|/i);
+  if(m) return 'ed2k:' + m[1].toLowerCase();
+  m = s.match(/\|([0-9a-fA-F]{32})\|\/?$/);
+  if(m) return 'ed2k:' + m[1].toLowerCase();
+  return s;
+}
+function submitFingerprint(txt, kind, cat){
+  const keys = String(txt||'').split('\n').map(function(l){ return l.trim(); })
+    .filter(function(l){ return l && l.charAt(0) !== '#'; })
+    .map(linkDedupKey).sort();
+  return kind + '|' + cat + '|' + keys.join(';');
+}
+function dupGuardLeft(txt, kind, cat){
+  if(!lastSubmit) return {left:0, ago:0};
+  if(lastSubmit.fp !== submitFingerprint(txt, kind, cat)) return {left:0, ago:0};
+  const elapsed = Date.now() - lastSubmit.ts;
+  const left = DUP_GUARD_MS - elapsed;
+  return left > 0 ? {left: Math.ceil(left/1000), ago: Math.round(elapsed/1000)} : {left:0, ago:0};
+}
+function dupGuardMark(txt, kind, cat, n){
+  lastSubmit = {fp: submitFingerprint(txt, kind, cat), ts: Date.now(), n: n};
+  try{ localStorage.setItem(LS_LAST_SUBMIT, JSON.stringify(lastSubmit)); }catch(e){}
+}
+function loadLastSubmit(){
+  try{ lastSubmit = JSON.parse(localStorage.getItem(LS_LAST_SUBMIT) || 'null'); }catch(e){ lastSubmit = null; }
+  if(!lastSubmit || typeof lastSubmit.fp !== 'string' || typeof lastSubmit.ts !== 'number') lastSubmit = null;
+}
+
 /* ---------- 提交 ---------- */
 async function submitBatch(){
   const txt = document.getElementById('links').value;
@@ -334,6 +382,11 @@ async function submitBatch(){
   if(!txt.trim()){ toast('请先粘贴磁力/电驴链接', 'err'); return; }
   if(txt !== lastParsedText){ await doPreview(); }
   if(!previewItems.length){ toast('没有可提交的有效链接', 'err'); return; }
+  const dup = dupGuardLeft(txt, kind, cat);
+  if(dup.left){
+    toast('这批 ' + lastSubmit.n + ' 条链接 ' + dup.ago + ' 秒前刚提交过, 已拦截防重复入库; 确实要再提交一次, 请等 ' + dup.left + ' 秒后再点。', 'warn');
+    return;
+  }
   submitBusy = true;
   const btn = document.getElementById('btnSubmit');
   btn.disabled = true; btn.textContent = '提交中…';
@@ -348,6 +401,7 @@ async function submitBatch(){
   }
   submitBusy = false; btn.textContent = '批量入库'; btn.disabled = false;
   if(d.error){ toast(d.error, 'err'); return; }
+  if((d.submitted || 0) > 0) dupGuardMark(txt, kind, cat, previewItems.length);   // 全失败不记, 允许立刻重试
   const items = d.items || [];
   const t0 = Date.now();
   items.forEach(function(it){
@@ -358,11 +412,15 @@ async function submitBatch(){
     }
   });
   saveBatch(); renderBatch(); resumePolls();
-  const okN = d.submitted || 0, badN = d.failed || 0, skipN = d.skipped || 0;
-  toast('已提交 ' + okN + ' 条' + (badN?', 失败 '+badN+' 条':'') + (skipN?', 跳过 '+skipN+' 行':''));
+  const okN = d.submitted || 0, badN = d.failed || 0, skipN = d.skipped || 0, dupN = d.dup_skipped || 0;
+  toast('已提交 ' + okN + ' 条' + (badN?', 失败 '+badN+' 条':'') + (skipN?', 解析跳过 '+skipN+' 行':'')
+        + (dupN?', 查重跳过 '+dupN+' 条':''));
   if(skipN && (d.errors||[]).length){
     const first = d.errors[0];
     toast('第 '+first.line+' 行被跳过: '+first.error, 'warn');
+  }
+  if(dupN && (d.duplicates||[]).length){
+    toast('第 '+d.duplicates[0].line+' 行: '+d.duplicates[0].error, 'warn');
   }
 }
 
@@ -529,6 +587,7 @@ function pollLogin(){
 
 /* ---------- 启动 ---------- */
 initCats();
+loadLastSubmit();
 loadBatch();
 renderBatch();
 resumePolls();
