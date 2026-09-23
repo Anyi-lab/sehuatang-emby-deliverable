@@ -3798,13 +3798,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .plink:hover{text-decoration:underline}
 .panel-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid #21262d}
 .tools{display:flex;gap:8px;align-items:center;margin-left:auto}
-table{width:100%;border-collapse:collapse;background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden}
-.tw{overflow-x:auto}
-th,td{padding:10px 12px;text-align:left;border-bottom:1px solid #21262d;font-size:13px;vertical-align:middle}
+table{width:100%;border-collapse:collapse;background:#161b22;border:1px solid #30363d}
+/* .tw 承担裁剪与圆角: table 上的 overflow:hidden 会让它自己变成 sticky 的定位容器, 操作列就贴不回屏幕右侧了 */
+.tw{overflow-x:auto;border-radius:8px}
+/* v1.15.4: 操作列固定在右侧 —— 列多时表格会横向溢出, 原先最右的「✅继续 / 重推115 / 整理」被推到屏幕外, 看不见也点不到 */
+.tw th:last-child,.tw td:last-child{position:sticky;right:0;background:#161b22;box-shadow:-8px 0 8px -8px rgba(0,0,0,.75)}
+.tw th:last-child{background:#21262d}
+.tw tr:hover td:last-child{background:#1c2128}
+th,td{padding:10px 10px;text-align:left;border-bottom:1px solid #21262d;font-size:13px;vertical-align:middle}
 th{background:#21262d;color:#8b949e;font-weight:600;white-space:nowrap}
 tr:hover td{background:#1c2128}
-td .t{max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-td .tid{display:inline-block;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
+td .t{max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+td .tid{display:inline-block;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
 .badge{display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600;white-space:nowrap}
 .badge.queued{background:#21262d;color:#8b949e;border:1px solid #30363d}
 .badge.running{background:#1f6feb22;color:#58a6ff;border:1px solid #1f6feb}
@@ -3884,8 +3889,8 @@ tr.row-done td{background:#2386360a}
 .bar2{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
 .bar2 .spacer{flex:1}
 .bar{margin-bottom:10px}
-.msgcell{max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8b949e;cursor:default}
-.msgcell.open{white-space:normal;max-width:340px;word-break:break-all}
+.msgcell{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8b949e;cursor:default}
+.msgcell.open{white-space:normal;max-width:320px;word-break:break-all}
 .msg-wrap{display:flex;gap:6px;align-items:flex-start}
 .msg-more{background:none;border:none;color:#58a6ff;cursor:pointer;font-size:12px;padding:0;font-family:inherit;flex:none}
 .empty .eacts{margin-top:14px;display:flex;gap:8px;justify-content:center}
