@@ -1205,6 +1205,26 @@ def _extract_fanhao_candidates(local_dir):
                 cands.add(m.group(1))
     return cands
 
+# 手动入库补番号 (2026-09-23): 手填磁力/ed2k 没有帖子上下文, 标题只能写"手动入库",
+# 监控页里一排"手动入库"没法辨认。用 115 落地文件名抠番号回填标题。
+# 文件名常见前缀杂质: www.98T.la@ / 489155.com@ / hhd800.com@ / [javdb.com] / [98t.tv]
+_FANHAO_STRIP_PREFIX_RE = re.compile(r'^(?:\[[^\]]*\]|[^@\[\]]*@)+')
+_FANHAO_DIGIT_PREFIX_RE = re.compile(r'(?<![A-Z0-9])(\d{2,6}[A-Z]{2,10}-?\d{2,6})(?![A-Z0-9])')
+_FANHAO_FC2_RE = re.compile(r'(FC2[-_]?PPV[-_]?\d{3,7})')
+
+def _fanhao_from_names(names):
+    """从 115 落地文件名抠番号 (2026-09-23)。支持三种写法:
+    LUXU-907 / VRKM01741 (纯字母前缀) · 259LUXU-907 (数字前缀) · FC2PPV-123456"""
+    for n in names or []:
+        base = os.path.basename(str(n))
+        base = os.path.splitext(base)[0]
+        base = _FANHAO_STRIP_PREFIX_RE.sub('', base).upper()
+        m = (_FANHAO_RE.search(base) or _FANHAO_DIGIT_PREFIX_RE.search(base)
+             or _FANHAO_FC2_RE.search(base))
+        if m:
+            return m.group(1).upper()
+    return ''
+
 def _find_mdc_output(cands, recent_min=20, root=None):
     """在 MDC_TARGET_ROOT 下找已刮削完成的目录 (strm+nfo+图片齐全, 目录名含番号候选 或 近期创建)。
     2026-09-06: root 可按分类传入 (已刮削/<分类>), 默认 AV。"""
@@ -1635,6 +1655,14 @@ def _run_import_dl(task_id, thread_id=None, magnet=None, title=None, thread_url=
         else:
             hash_list = [Push115.link_hash(m) for m in magnet_list]
             videos, dirs = p.wait_video(savepath, timeout=600, hashes=hash_list)
+
+        # 2.25 手动入库补番号 (2026-09-23): 无帖上下文时标题只有"手动入库", 监控页无从辨认。
+        #      用刚落地视频的文件名抠番号回填 title -> 后续 msg 里的 label 也随带番号。
+        if videos and (title or '').strip() in ('', '手动入库'):
+            _fh = _fanhao_from_names(videos)
+            if _fh:
+                title = _fh
+                log.info('[import] 手动入库补番号: %s (task=%s, %d 个视频)', _fh, task_id, len(videos))
 
         # 2.3 等下载大小稳定 (剧集/电影都要; 防正片未下完被误删/改名; 2026-08-15 提前到下载阶段)
         try:
