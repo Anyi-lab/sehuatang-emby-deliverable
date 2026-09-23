@@ -99,6 +99,10 @@ sehuatang-emby-deliverable/
 - ✅ 批量入库防重（v1.15.2）—— 面板连点两次不会再发重：前端同一批链接 60s 内直接拦（指纹落 localStorage，
   换页也拦），服务端 `/api/import/batch` 另按链接 hash 查重（同 hash 已有 `queued/running` 任务就跳过，
   回报 `dup_skipped`）；顺带修掉每次推送都刷的 `_fs_cache()` 空指针 warning 噪音。
+- ✅ 手动入库自动认番号（v1.15.3）—— 手填磁力/ed2k 没有帖子上下文，标题原先一律写"手动入库"，监控页一排同名
+  没法辨认。现在文件落地后从 115 文件名抠番号回填标题（`www.98T.la@` / `489155.com@` / `[javdb.com]` 等前缀先剥掉，
+  兼容 `LUXU-907` / `259LUXU-907` / `FC2PPV-123456` 三种写法），完成消息里的 label 也随带番号。
+  历史存量记录可用本地 `manual_<hash8>` 落地目录一次性回填。
 
 ---
 
