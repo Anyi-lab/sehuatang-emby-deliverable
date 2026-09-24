@@ -8,7 +8,8 @@ mcp115.py — 本地版 115 操作适配层 (115-Desktop MCP 后端)
   - 任务查询:  get_offline_tasks
   - 文件操作:  list_files (条目含 pickcode pc) / create_folder / rename_file / move_files / delete_files
 路径约定: 与交付包一致, 115 绝对路径如 '/sehuatang/thread_x', 根为 ''。
-strm 302 直链: http://192.168.2.238:11500/d/<pickcode>/<url编码文件名> (115-Desktop strm 服务现场签发 CDN 302)
+strm 302 直链: 默认写本地中继 http://192.168.2.238:11501/d/<pickcode>/<url编码文件名>
+  (2026-09-24 起；直发地址 :11500/d/ 恒 302 且 CDN 直链签名绑 UA → Emby 403，故走中继)
 """
 import os
 import re
@@ -26,7 +27,12 @@ sys.path.insert(0, '/root/clacky_workspace')
 from mcp_lib_115 import McpClient, find_entries, is_file_entry, pick, nfc, norm_name
 
 MEDIA_EXTS = {'.mp4', '.mkv', '.mov', '.avi', '.flv', '.m4v', '.ts', '.wmv', '.rmvb', '.rm', '.webm'}
-STRM_HOST = 'http://192.168.2.238:11500'   # 115-Desktop strm 服务 (局域网, 302 直链 115 CDN)
+# 新生成的 strm 指向哪里。
+# 2026-09-24：默认从 115-Desktop 直发地址 (:11500, /d/ 恒 302 且直链签名绑 UA → Emby 403)
+# 改为本地中继 (:11501, strm-relay 固定 UA 取链+取流 → Emby 实测 206)。
+# 想切回直连（例如配合 Jellyfin 客户端直连 / 神医助手独占模式）用环境变量覆盖：
+#   STRM_HOST=http://192.168.2.238:11500 systemctl restart strm-panel import-api
+STRM_HOST = os.environ.get('STRM_HOST', 'http://192.168.2.238:11501').rstrip('/')
 PAGE = 200
 _OFFLINE_FINISHED = 2
 
