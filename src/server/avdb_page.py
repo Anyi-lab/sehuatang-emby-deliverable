@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """avdb_page.py — avdb 连接器面板 (独立页面, 与色花堂入库任务页分开)
-由 import_api.py 的 GET /avdb 提供。数据来自 /api/avdb/status (纯本地读取, 零网络)。"""
+由 import_api.py 的 GET /avdb 提供。数据来自 /api/avdb/status (纯本地读取, 零网络)。
+2026-09-28 改版: 台账真实统计 + 状态筛选 + 番号搜索 + 分页; 待接手标注已处理行。
+"""
 
 AVDB_PAGE = r"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -41,12 +43,22 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .container{max-width:1280px;margin:0 auto;padding:20px 24px}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
 .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 16px}
+.card.click{cursor:pointer}
+.card.click:hover{border-color:#8b949e}
+.card.on{border-color:#d29922;background:#1c1a12}
 .card .lbl{font-size:12px;color:#8b949e}
 .card .num{font-size:22px;font-weight:700;margin-top:4px;word-break:break-all}
 .ok{color:#3fb950}.bad{color:#f85149}.warn{color:#d29922}.dim{color:#8b949e}.blue{color:#58a6ff}
 .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
 .tools{margin-left:auto;display:flex;gap:8px;align-items:center}
 .hint{font-size:12px;color:#8b949e}
+.fbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 10px}
+.fbar .chip{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 12px;border:1px solid #30363d;border-radius:14px;background:#21262d;color:#c9d1d9;font-size:12.5px;cursor:pointer;font-family:inherit}
+.fbar .chip:hover{border-color:#8b949e}
+.fbar .chip.on{background:#483600;border-color:#d29922;color:#d29922;font-weight:600}
+.fbar input[type=text]{height:28px;padding:0 10px;min-width:190px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-family:inherit;font-size:12.5px}
+.fbar input[type=text]:focus{outline:none;border-color:#58a6ff}
+.fbar select{height:28px;background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-family:inherit;font-size:12.5px}
 h2{font-size:15px;color:#58a6ff;margin:22px 0 10px;display:flex;align-items:center;gap:10px}
 h2 .sub{font-size:12px;color:#8b949e;font-weight:400}
 table{width:100%;border-collapse:collapse;background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden;font-size:13px}
@@ -55,13 +67,14 @@ td{padding:9px 12px;border-top:1px solid #21262d;vertical-align:top}
 tr:hover td{background:#11161d}
 .pill{display:inline-block;padding:2px 9px;border-radius:10px;font-size:11px;white-space:nowrap}
 .p-submitted,.p-done,.p-adopted,.p-done_imported{background:#0f2d1b;color:#3fb950}
-.p-missing,.p-not_on_115{background:#2d2a0f;color:#d29922}
-.p-failed,.p-submit_failed,.p-adopt_failed,.p-no_number{background:#2d1214;color:#f85149}
+.p-missing,.p-not_on_115,.p-waiting,.p-ledger{background:#2d2a0f;color:#d29922}
+.p-failed,.p-submit_failed,.p-adopt_failed,.p-no_number,.p-expired{background:#2d1214;color:#f85149}
 .p-queued,.p-running{background:#0d2440;color:#58a6ff}
-.p-ledger{background:#21262d;color:#8b949e}
+.p-skipped{background:#21262d;color:#8b949e}
 .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:#8b949e}
 .empty{padding:16px;color:#8b949e;font-size:13px;background:#161b22;border:1px dashed #30363d;border-radius:8px}
 .note{background:#161b22;border:1px solid #30363d;border-left:3px solid #d29922;border-radius:6px;padding:10px 14px;font-size:12px;color:#8b949e;margin-bottom:14px;line-height:1.7}
+.pager{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin:10px 0 0;font-size:12px;color:#8b949e}
 </style>
 </head>
 <body>
@@ -73,6 +86,7 @@ tr:hover td{background:#11161d}
     <a class="btn sm" href="/">🚀 一键入库</a>
     <a class="btn sm" href="/tasks">📋 任务监控</a>
     <a class="btn sm avdb cur" href="/avdb">🔗 avdb 连接器</a>
+    <a class="btn sm posters" href="/posters">🖼️ 海报体检</a>
   </div>
 </div>
 <div class="container">
@@ -94,45 +108,83 @@ tr:hover td{background:#11161d}
   </div>
 
   <div id="scanBox"></div>
+  <div id="stuckBox"></div>
 
-  <h2>待接手 <span class="sub">avdb 有下载记录、守护还没处理（水位之后）</span></h2>
+  <h2>待接手 <span class="sub" id="pendingSub">avdb 有下载记录、还没进台账（水位之后）</span></h2>
   <div id="pending"></div>
 
-  <h2>连接器台账 <span class="sub">守护处理过的每一条 avdb 下载记录</span></h2>
+  <h2>连接器台账 <span class="sub" id="ledgerSub">守护处理过的每一条 avdb 下载记录</span></h2>
+  <div class="fbar">
+    <span class="hint">筛选</span>
+    <span class="chip on" data-st="" onclick="setFilter(this)">全部</span>
+    <span class="chip" data-st="submitted" onclick="setFilter(this)">已提交</span>
+    <span class="chip" data-st="missing" onclick="setFilter(this)">未找到</span>
+    <span class="chip" data-st="skipped" onclick="setFilter(this)">跳过</span>
+    <span class="chip" data-st="waiting" onclick="setFilter(this)">等待落点</span>
+    <span class="chip" data-st="fail" onclick="setFilter(this)">失败</span>
+    <input type="text" id="q" placeholder="搜番号 / 说明…" onkeydown="if(event.key==='Enter'){PAGE.offset=0;load();}">
+    <select id="perPage" onchange="PAGE.offset=0;load()">
+      <option value="100">每页 100</option>
+      <option value="200">每页 200</option>
+      <option value="50">每页 50</option>
+    </select>
+    <button class="btn sm ghost" onclick="PAGE.offset=0;load()">应用</button>
+  </div>
   <div id="ledger"></div>
+  <div class="pager" id="pager"></div>
 </div>
 <script>
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 var LBL={submitted:'已提交',done:'完成',adopted:'已提交',ledger:'台账已有',no_number:'无番号',
   not_on_115:'115 无落点',done_imported:'已在库里',candidate:'漏网待入库',adopt_failed:'提交失败',
-  missing:'未找到',skipped:'跳过',failed:'失败',queued:'排队',running:'进行中'};
+  missing:'未找到',skipped:'跳过',failed:'失败',queued:'排队',running:'进行中',
+  waiting:'等待落点',expired:'等待超时',submit_failed:'提交失败'};
 function pill(s){return '<span class="pill p-'+esc(s)+'" title="'+esc(s)+'">'+esc(LBL[s]||s||'-')+'</span>';}
-var CUR=null;
+var CUR=null, PAGE={status:'',q:'',limit:100,offset:0};
+var CARDS=[['submitted','已提交入库','台账累计','ok'],['missing','未找到落点','115 上查不到','warn'],
+           ['waiting','等待落点','手动提交的磁力','warn'],['fail','失败','需人工看一眼','bad'],
+           ['skipped','跳过','无番号/无需处理','dim']];
 
 function load(){
-  fetch('/api/avdb/status').then(function(r){return r.json();}).then(function(d){
+  var u='/api/avdb/status?status='+encodeURIComponent(PAGE.status)+'&q='+encodeURIComponent(PAGE.q)
+        +'&limit='+PAGE.limit+'&offset='+PAGE.offset+'&_='+Date.now();
+  fetch(u).then(function(r){return r.json();}).then(function(d){
     CUR=d;
-    var g=d.guard||{};
+    var g=d.guard||{}, b=(d.ledger&&d.ledger.by_status)||{};
     var st = g.paused ? '<span class="warn">已暂停</span>' : (g.alive ? '<span class="ok">运行中</span>' : '<span class="bad">无心跳</span>');
     var age = (g.age==null) ? '—' : (g.age+'s 前');
     var c='';
     c+=card('守护状态', st, '心跳 '+age+' / '+g.interval+'s 一轮');
-    c+=card('水位', (d.watermark==null?'未初始化':d.watermark), 'avdb 最大 id '+ (d.avdb_max_id==null?'—':d.avdb_max_id), 'dim');
-    c+=card('待接手', d.pending_count||0, '等待守护处理', (d.pending_count?'warn':'dim'));
-    var b=d.ledger.by_status||{};
-    c+=card('已提交入库', b.submitted||0, '台账累计', 'ok');
-    c+=card('跳过/未找到', (b.missing||0)+(b.skipped||0), '115 上已无落点', 'warn');
-    c+=card('失败', b.submit_failed||0, '需人工看一眼', (b.submit_failed?'bad':'dim'));
+    c+=card('台账总计', (d.ledger.total||0), '守护处理过的记录', 'dim');
+    var openN = (d.pending_open==null?0:d.pending_open);
+    c+=card('待接手', (d.pending_count||0),
+            (openN===0?'水位之后的都已进台账':'其中未处理 '+openN+' 条'), (openN?'warn':'dim'));
+    CARDS.forEach(function(x){
+      var n = (x[0]==='fail') ? ((b.submit_failed||0)+(b.adopt_failed||0)+(b.expired||0)) : (b[x[0]]||0);
+      c+=cardClick(x[0], x[1], n, x[2], x[3]);
+    });
     document.getElementById('cards').innerHTML=c;
     document.getElementById('pauseBtn').innerHTML = g.paused ? '▶ 恢复守护' : '⏸ 暂停守护';
 
+    var sb=document.getElementById('stuckBox'), sk=d.pending_stuck;
+    sb.innerHTML = sk ? ('<div class="note" style="border-left-color:#58a6ff">⏳ 水位停在 <span class="mono">id='+sk.dl_id+
+      '</span>：这条是手动提交的磁力，还在等 115 落地（已试 '+sk.tries+' 次，'+(sk.since||'')+' 起，最多等 '+
+      sk.ttl_hours+' 小时）。它没结果前水位不推进，所以下面的「待接手」不会归零 —— 已进台账的行标了状态，不是没处理。</div>') : '';
+
     var p=d.pending||[];
+    document.getElementById('pendingSub').textContent =
+      '水位之后 ' + p.length + ' 条，其中未进台账 ' + openN + ' 条';
     document.getElementById('pending').innerHTML = p.length ? (
-      '<table><tr><th>id</th><th>番号</th><th>avdb 落点</th><th>记录时间</th><th>标题</th></tr>'+
-      p.map(function(x){return '<tr><td class="mono">'+x.dl_id+'</td><td><b>'+esc(x.number)+'</b></td><td class="mono">/sehuatang/AVDB/'+esc(x.save_path)+'</td><td class="mono">'+esc(x.create_time)+'</td><td>'+esc(x.title)+'</td></tr>';}).join('')+
-      '</table>') : '<div class="empty">没有待接手的记录 —— avdb 里新提交下载后，守护会在 60 秒内接手。</div>';
+      '<table><tr><th>id</th><th>番号</th><th>avdb 落点</th><th>记录时间</th><th>台账状态</th><th>标题</th></tr>'+
+      p.map(function(x){
+        var st2 = x.ledger_status ? pill(x.ledger_status) : '<span class="dim">未处理</span>';
+        return '<tr><td class="mono">'+x.dl_id+'</td><td><b>'+esc(x.number||'—')+'</b></td><td class="mono">/sehuatang/AVDB/'+esc(x.save_path)+'</td><td class="mono">'+esc(x.create_time)+'</td><td>'+st2+'</td><td>'+esc(x.title)+'</td></tr>';
+      }).join('')+'</table>') : '<div class="empty">没有水位之后的记录 —— avdb 里新提交下载后，守护会在 60 秒内接手。</div>';
 
     var s=d.seen||[];
+    document.getElementById('ledgerSub').textContent =
+      '匹配 ' + (d.ledger.filtered||0) + ' / 共 ' + (d.ledger.total||0) + ' 条' +
+      (PAGE.status||PAGE.q ? '（已筛选）' : '');
     document.getElementById('ledger').innerHTML = s.length ? (
       '<table><tr><th>id</th><th>番号</th><th>台账状态</th><th>入库任务</th><th>进度</th><th>说明</th><th>更新时间</th></tr>'+
       s.map(function(x){
@@ -140,14 +192,46 @@ function load(){
         var stt = x.status;
         if(x.imported_task){ t = '<a href="/tasks?task_id='+esc(x.imported_task)+'" style="color:#3fb950" class="mono">'+esc(x.imported_task)+'</a>'; stt='done_imported'; }
         var prog = x.task_status ? pill(x.task_status)+' <span class="dim">'+esc(x.task_step)+'</span>' : '<span class="dim">—</span>';
-        return '<tr><td class="mono">'+x.dl_id+'</td><td><b>'+esc(x.number)+'</b></td><td>'+pill(stt)+
+        return '<tr><td class="mono">'+x.dl_id+'</td><td><b>'+esc(x.number||'—')+'</b></td><td>'+pill(stt)+
                '</td><td>'+t+'</td><td>'+prog+'</td><td class="dim">'+esc(x.note||x.task_msg||'')+'</td><td class="mono">'+esc(x.updated_at)+'</td></tr>';
-      }).join('')+'</table>') : '<div class="empty">台账还是空的。</div>';
+      }).join('')+'</table>') : '<div class="empty">这个筛选下没有记录。</div>';
+
+    var tot=d.ledger.filtered||0, from=PAGE.offset+1, to=PAGE.offset+s.length;
+    var hasPrev = PAGE.offset>0, hasNext = to<tot;
+    document.getElementById('pager').innerHTML = tot ? (
+      '<span>'+(s.length?from+'–'+to+' / '+tot:'0 / '+tot)+'</span>'+
+      '<button class="btn sm ghost" '+(hasPrev?'':'disabled')+' onclick="page(-1)">← 上一页</button>'+
+      '<button class="btn sm ghost" '+(hasNext?'':'disabled')+' onclick="page(1)">下一页 →</button>') : '';
   }).catch(function(e){document.getElementById('hint').innerHTML='<span class="bad">读取失败: '+esc(e)+'</span>';});
+}
+
+function page(d){
+  PAGE.limit = parseInt(document.getElementById('perPage').value||100,10);
+  PAGE.offset = Math.max(0, PAGE.offset + d*PAGE.limit);
+  load();
+}
+
+function setFilter(el){
+  PAGE.status = el.getAttribute('data-st')||'';
+  PAGE.offset = 0;
+  var cs=document.querySelectorAll('.fbar .chip');
+  for(var i=0;i<cs.length;i++){ cs[i].className = 'chip'; }
+  el.className = 'chip on';
+  load();
 }
 
 function card(lbl,val,sub,cls){
   return '<div class="card"><div class="lbl">'+esc(lbl)+'</div><div class="num '+(cls||'')+'">'+val+'</div><div class="lbl" style="margin-top:4px">'+esc(sub||'')+'</div></div>';
+}
+function cardClick(st,lbl,val,sub,cls){
+  var on = (PAGE.status===st)?' on':'';
+  return '<div class="card click'+on+'" onclick="setFilterSt(\''+st+'\')"><div class="lbl">'+esc(lbl)+
+         '</div><div class="num '+(cls||'')+'">'+val+'</div><div class="lbl" style="margin-top:4px">'+esc(sub||'')+'</div></div>';
+}
+function setFilterSt(st){
+  var cs=document.querySelectorAll('.fbar .chip');
+  for(var i=0;i<cs.length;i++){ if((cs[i].getAttribute('data-st')||'')===st){ setFilter(cs[i]); return; } }
+  PAGE.status=st; PAGE.offset=0; load();
 }
 
 function scan(apply){
@@ -175,7 +259,7 @@ function togglePause(){
       load();
     });
 }
-load();setInterval(load,15000);
+load();setInterval(load,30000);
 </script>
 </body>
 </html>

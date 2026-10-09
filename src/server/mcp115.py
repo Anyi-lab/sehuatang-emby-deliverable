@@ -8,8 +8,11 @@ mcp115.py — 本地版 115 操作适配层 (115-Desktop MCP 后端)
   - 任务查询:  get_offline_tasks
   - 文件操作:  list_files (条目含 pickcode pc) / create_folder / rename_file / move_files / delete_files
 路径约定: 与交付包一致, 115 绝对路径如 '/sehuatang/thread_x', 根为 ''。
-strm 302 直链: 默认写本地中继 http://192.168.2.238:11501/d/<pickcode>/<url编码文件名>
-  (2026-09-24 起；直发地址 :11500/d/ 恒 302 且 CDN 直链签名绑 UA → Emby 403，故走中继)
+strm 302 直链: 默认写 115-Desktop 直发地址 http://192.168.2.238:11500/d/<pickcode>/<url编码文件名>
+  (2026-09-25 起；:11500/d/ 恒 302 到 CDN 直链，直链签名绑请求方 UA，
+   Emby 取流侧已由插件 Emby.StrmUaFix 补齐 UA → 实测 206，故不再需要本地中继)
+  (2026-09-24 曾短暂改用本地中继 :11501，现已回滚；relay 服务于 2026-09-26 停用归档，
+   回退见 scripts/strm_relay_toggle.sh)
 """
 import os
 import re
@@ -28,11 +31,13 @@ from mcp_lib_115 import McpClient, find_entries, is_file_entry, pick, nfc, norm_
 
 MEDIA_EXTS = {'.mp4', '.mkv', '.mov', '.avi', '.flv', '.m4v', '.ts', '.wmv', '.rmvb', '.rm', '.webm'}
 # 新生成的 strm 指向哪里。
-# 2026-09-24：默认从 115-Desktop 直发地址 (:11500, /d/ 恒 302 且直链签名绑 UA → Emby 403)
-# 改为本地中继 (:11501, strm-relay 固定 UA 取链+取流 → Emby 实测 206)。
-# 想切回直连（例如配合 Jellyfin 客户端直连 / 神医助手独占模式）用环境变量覆盖：
-#   STRM_HOST=http://192.168.2.238:11500 systemctl restart strm-panel import-api
-STRM_HOST = os.environ.get('STRM_HOST', 'http://192.168.2.238:11501').rstrip('/')
+# 2026-09-25：默认 = 115-Desktop 直发地址 (:11500, /d/ 恒 302 → CDN 直链)。
+# 直链签名绑请求方 UA，Emby 取流侧已由插件 Emby.StrmUaFix 补齐 UA（实测 500→206），
+# 因此不再需要本地中继。回退保险：本地中继 :11501 的代码与一键开关仍在
+# （scripts/strm_relay_toggle.sh on --switch-strm，会一并切 strm 端口与面板 host）。
+# 临时只改 host 的话：
+#   STRM_HOST=http://192.168.2.238:11501 systemctl restart strm-panel sehuatang-import
+STRM_HOST = os.environ.get('STRM_HOST', 'http://192.168.2.238:11500').rstrip('/')
 PAGE = 200
 _OFFLINE_FINISHED = 2
 
@@ -115,6 +120,7 @@ class MCP115:
                 is_dir = not is_file_entry(e)
                 out.append({'fid': str(fid), 'fn': nfc(str(nm)), 'is_dir': is_dir,
                             'size': int(pick(e, ('fs', 'file_size', 'size', 'size_byte')) or 0),
+                            'upt': int(pick(e, ('upt', 'uet', 'user_ptime', 'ptime')) or 0),
                             'pc': str(pick(e, ('pc', 'pick_code')) or '')})
             if len(ents) < PAGE:
                 break

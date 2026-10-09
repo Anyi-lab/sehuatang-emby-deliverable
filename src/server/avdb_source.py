@@ -77,6 +77,13 @@ def _strip_noise(z):
     return z
 
 
+# FC2 家族归一 (2026-09-27): avdb 在 download_log 记的番号是『FC2-4975283』(把 PPV 吞了),
+# 而 115 上的目录名来自磁力里的 dn(wiki 更新日志 20260316: 优先 dn, 无 dn 用 btih),
+# 实测有『FC2PPV-4975283』『FC2-PPV-4571491』『FC2PPV-2238344-C』三种写法 → 全部指同一部。
+# 若按通用规则拆, 「FC2PPV-2238344-C」会被拆成 ('FC','2') 而彻底失配, 故在此单独收口。
+_RE_FC2_KEY = re.compile(r'^FC2(?:PPV)?(\d{3,8})')
+
+
 def number_key(n):
     """番号拆成 (系列, 数字) 便于模糊匹配。比旧版多容忍三类现实命名:
       'SQTE-701_4KS'                -> ('SQTE','701')      去画质尾巴
@@ -88,6 +95,9 @@ def number_key(n):
     s = _strip_noise(_squeeze(normalize_number(n)))
     if not s:
         return '', ''
+    m_fc2 = _RE_FC2_KEY.match(s)                # FC2 / FC2PPV / FC2-PPV → ('FC2PPV', 数字)
+    if m_fc2:
+        return 'FC2PPV', m_fc2.group(1)
     m = re.match(r'^([A-Z]+)[-_]?(\d+)', s)
     if m:
         return m.group(1), m.group(2)
@@ -149,13 +159,17 @@ def fetch_downloads(after_id=0, limit=100):
         return []
     try:
         c.row_factory = sqlite3.Row
+        # 2026-09-28 性能: article 表 33 万行且 tid 无显式索引, 原来先对全表做
+        # GROUP BY tid 再 JOIN, 单次 0.48s (面板每 15s 轮询一次)。改成只聚合本窗口出现的 tid,
+        # 实测 0.000s, 语义不变。
         rows = c.execute(
             "SELECT d.*, a.number AS _a_number, a.title AS _a_title "
             "FROM download_log d "
             "LEFT JOIN (SELECT tid, MAX(number) AS number, MAX(title) AS title "
-            "           FROM article GROUP BY tid) a ON a.tid = d.tid "
+            "           FROM article WHERE tid IN (SELECT tid FROM download_log WHERE id > ?) "
+            "           GROUP BY tid) a ON a.tid = d.tid "
             "WHERE d.id > ? ORDER BY d.id ASC LIMIT ?",
-            (int(after_id), int(limit))).fetchall()
+            (int(after_id), int(after_id), int(limit))).fetchall()
         out = []
         for r in rows:
             d = dict(r)
@@ -232,14 +246,36 @@ def list_avdb_dirs(p, save_path=''):
     return dirs, root
 
 
-def match_dir(p, save_path, number, extra_depth=True):
+def name_candidates(resource_name):
+    """avdb 记录里的 resource_name → 115 目录名候选 (2026-09-27)。
+    manual/订阅推送的链接, avdb 里存的就是「磁力/种子文件名」(如 FC2PPV-4975283.torrent);
+    而 115 建目录优先用磁力里的 dn(wiki 更新日志 20260316-2002) → 去扩展名即目录名。
+    注意: 手动提交链接的记录 resource_name 就是字面量『手动提交链接』, 不算候选。"""
+    out = []
+    s = str(resource_name or '').strip()
+    if not s or s == '手动提交链接':
+        return out
+    for c in (s, os.path.splitext(s)[0]):
+        c = c.strip().strip('/')
+        if c and c not in out:
+            out.append(c)
+    return out
+
+
+def match_dir(p, save_path, number, extra_depth=True, extra_names=()):
     """在 avdb 落点里找该番号的目录。
     先按 save_path 直接列; 找不到(或 save_path 为空)时退回扫 AVDB_LIB 两层。
+    extra_names: 额外候选名 (resource_name = 磁力文件名 = 115 目录名), 与番号等效参与判同。
     返回 (115 目录全路径, 目录名) 或 (None, None)"""
+    extra = [x for x in (extra_names or []) if x]
+
+    def _hit(d):
+        return same_number(d, number) or any(same_number(d, x) for x in extra)
+
     cands = []
     dirs, root = list_avdb_dirs(p, save_path)
     for d in dirs:
-        if same_number(d, number):
+        if _hit(d):
             return root + '/' + d, d
         cands.append((root, d))
     if extra_depth:
@@ -248,16 +284,16 @@ def match_dir(p, save_path, number, extra_depth=True):
         for t in top:
             sub_dirs, sub_root = list_avdb_dirs(p, t)
             for d in sub_dirs:
-                if same_number(d, number):
+                if _hit(d):
                     return sub_root + '/' + d, d
     return None, None
 
 
-def resolve(number, p, save_path=''):
+def resolve(number, p, save_path='', extra_names=()):
     """一站式解析: 番号 → {number, magnet, title, dir_115, dir_name, src_root}
     p = Push115 实例 (由调用方传入, 避免本模块依赖 import_api)"""
     art = fetch_article(number) or {}
-    dir_115, dir_name = match_dir(p, save_path, number)
+    dir_115, dir_name = match_dir(p, save_path, number, extra_names=extra_names)
     return {
         'number': number,
         'magnet': art.get('magnet') or '',

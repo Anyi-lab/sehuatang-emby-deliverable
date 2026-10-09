@@ -130,6 +130,7 @@ table.rt tr:hover td{background:#11161d}
         <a class="btn sm cur" href="/">🚀 一键入库</a>
         <a class="btn sm" href="/tasks">📋 任务监控</a>
         <a class="btn sm avdb" href="/avdb">🔗 avdb 连接器</a>
+        <a class="btn sm posters" href="/posters">🖼️ 海报体检</a>
         <button class="btn sm purple" onclick="openLogin()">📱 115 扫码登录</button>
     </div>
 </div>

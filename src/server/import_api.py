@@ -17,6 +17,10 @@ from cd2grpc import MOUNT_PREFIX   # /115open, CD2 API 落地检测 (2026-08-19)
 import avdb_source as avdb_src     # avdb 下载侧数据源(只读本地 sqlite, 2026-09-19)
 from avdb_page import AVDB_PAGE       # avdb 连接器独立面板 (GET /avdb, 2026-09-19)
 from index_page import render_index_page   # 首页 (批量入库页, 2026-09-20 抽出)
+from poster_page import (render_poster_page,   # 海报体检页 (GET /posters, 2026-09-28)
+                         poster_audit as pp_audit,
+                         poster_fix as pp_fix,
+                         poster_refresh as pp_refresh)
 from datetime import datetime
 
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -336,17 +340,40 @@ MDC_TARGET_ROOT = '/mnt/g/srtm/已刮削/AV'
 # key -> (本地 strm watch 目录, MDC 刮削输出目录=已刮削/<分类>, 显示名)
 # 与用户手工创建的 G:\srtm\已刮削\<分类> 一一对应; MDCng watch_dirs 每分类一条,
 # 刮削完成后自动落入对应 已刮削/<分类>。默认 av = 旧行为(全部进 AV), 行为不变可回退。
+# 2026-10-09: 「杂项」= 无元数据/手动补的片子专用库, 同时是 MDC 刮不到时的兜底落点。
+MANUAL_CATEGORY = 'misc'
+MANUAL_ROOT = '/mnt/g/srtm/已刮削/杂项'
 CATEGORY_MAP = {
     'av':   ('/mnt/g/srtm/待看/sehuatang',       '/mnt/g/srtm/已刮削/AV',       'AV'),
     'fc2':  ('/mnt/g/srtm/待看/sehuatang_fc2',   '/mnt/g/srtm/已刮削/FC2',      'FC2'),
     'sw':   ('/mnt/g/srtm/待看/sehuatang_sw',    '/mnt/g/srtm/已刮削/丝袜',     '丝袜'),
-    'cn':   ('/mnt/g/srtm/待看/sehuatang_cn',    '/mnt/g/srtm/已刮削/国产自拍', '国产自拍'),
+    # 2026-09-27 用户决定: 国产再也不进 Emby 库 (片源广告/水印太多, 用户自己手动入库)。
+    # 'cn' 的 MDC 刮削输出根改指 _trash_国产 —— 流水线照旧跑完(落点校验/元数据注入都能命中),
+    # 但产物不在任何 Emby 库的扫描路径下 → 库里看不见。显示名保持「国产自拍」不变,
+    # 这样 115 落点仍是 /sehuatang/国产自拍/thread_x (存量结构不动, 用户想自己入随时可取)。
+    'cn':   ('/mnt/g/srtm/待看/sehuatang_cn',    '/mnt/g/srtm/_trash_国产',     '国产自拍'),
     'ea':   ('/mnt/g/srtm/待看/sehuatang_ea',    '/mnt/g/srtm/已刮削/欧美',     '欧美'),
     'lf':   ('/mnt/g/srtm/待看/sehuatang_lf',    '/mnt/g/srtm/已刮削/里番',     '里番'),
+    # 2026-10-09 用户需求: 「杂项」—— 杂七杂八、站点上没有元数据、只能靠帖子页手动补的片子
+    # 单独一库, 不混进 欧美/AV。MDC 不 watch 这个分类 (MDC watch_dirs 里没有它), 所以流水线
+    # 只到 strm 落地, 之后由 📤 手动补元数据 (服务端兜底建目录, 见 _fallback_emby_movie_dir)。
+    # 它同时是「MDC 刮不到」时的兜底落点 —— 手动刮的片子一律进这里, 一处可查。
+    'misc': ('/mnt/g/srtm/待看/sehuatang_misc',  MANUAL_ROOT,                  '杂项'),
 }
 DEFAULT_CATEGORY = 'av'
 # 分类 key -> 合法值 (api 校验 / 恢复路径使用)
 CATEGORY_KEYS = tuple(CATEGORY_MAP.keys())
+
+# 2026-09-27: 国产丢弃区 —— 与 MDC 命名模板里的 _trash_国产 一致 (不在任何 Emby 库的扫描路径下)。
+# MDC 把国产(麻豆 MD*/大象 CUS/91 系…)的刮削产物直接写到这里, 流水线只需认路, 不放进库。
+CN_DROP_ROOT = '/mnt/g/srtm/_trash_国产'
+CN_FANHAO_RE = re.compile(r'^(?:CUS|MD[A-Z]{0,3}\d|MSD|MMZ|MTVQ|MKY|GDCM|FSOG|QDOG|QQOG|XSJ|TZ\d|SAT\d|MXB|YK\d|PM[A-Z]?\d|91[A-Z]|SWAG|RAS|LZ\d|DHT)', re.I)
+
+
+def _looks_cn(cands):
+    """番号看着像国产 → 刮削产物会被 MDC 路由进 CN_DROP_ROOT (查找时需并上丢弃区)"""
+    return any(CN_FANHAO_RE.match(str(c or '').strip()) for c in (cands or []))
+
 
 def norm_category(cat):
     """归一化分类: 空/非法 -> 默认 av; 合法 key 原样返回 (大小写不敏感, 容忍首尾空白)"""
@@ -1210,7 +1237,7 @@ def _extract_fanhao_candidates(local_dir):
 # 文件名常见前缀杂质: www.98T.la@ / 489155.com@ / hhd800.com@ / [javdb.com] / [98t.tv]
 _FANHAO_STRIP_PREFIX_RE = re.compile(r'^(?:\[[^\]]*\]|[^@\[\]]*@)+')
 _FANHAO_DIGIT_PREFIX_RE = re.compile(r'(?<![A-Z0-9])(\d{2,6}[A-Z]{2,10}-?\d{2,6})(?![A-Z0-9])')
-_FANHAO_FC2_RE = re.compile(r'(FC2[-_]?PPV[-_]?\d{3,7})')
+_FANHAO_FC2_RE = re.compile(r'(FC2[-_]?(?:PPV[-_]?)?\d{4,8})')
 
 def _fanhao_from_names(names):
     """从 115 落地文件名抠番号 (2026-09-23)。支持三种写法:
@@ -1259,7 +1286,7 @@ _MDC_RETRY_PREFIX = '.mdc-retry-'
 # 2026-09-20: 「待补元数据」判据 (done 但没走到 scan = MDC 没刮全, 等油猴补)
 # 附带的 NOT EXISTS: 同一帖 (thread_id) 若已有更新的成功任务 (done/scan), 旧记录不再计入
 # —— 面板行内「🔁 重刮」成功后清单自动收敛, 无需手工清理。
-PENDING_MD_SQL = """(status='done' AND step<>'scan' AND NOT EXISTS (
+PENDING_MD_SQL = """(status='done' AND step<>'scan' AND IFNULL(kind,'')<>'metadata' AND NOT EXISTS (
     SELECT 1 FROM import_log n WHERE n.thread_id=import_log.thread_id AND n.status='done'
       AND n.step='scan' AND n.created_at>import_log.created_at))"""
 
@@ -1344,6 +1371,19 @@ def _wait_mdc_scrape(local_dir, timeout=300):
     (同路径旧任务去重不重刮的场景自救), 触发文件成功后清理。"""
     cands = _extract_fanhao_candidates(local_dir)
     target_root = category_target_root(category_of_local_dir(local_dir))
+    # 2026-09-27: 国产番号会被 MDC 命名模板路由到 _trash_国产 (不在 已刮削/<分类> 下),
+    # 因此这类任务的查找根要并上丢弃区, 否则会白等到超时、被误判「MDC 未刮削」。
+    roots = [target_root]
+    if CN_DROP_ROOT not in roots and _looks_cn(cands):
+        roots.append(CN_DROP_ROOT)
+    # 2026-09-28: 跨分类兜底根 —— MDCng 自分类可能与入库分类不一致 (实例 612: strm 在
+    # 待看/sehuatang(av), MDC 却刮进 已刮削/欧美)。60s 仍无结果时并扫这些根 (平时不扫, 省 walk)。
+    alt_roots = [t for _k, (_s, t, _n) in CATEGORY_MAP.items() if t not in roots]
+    # 2026-10-09: 杂项库永远排除在跨分类兜底之外 —— 那里的目录是「手动补元数据」建的
+    # (strm+nfo+图片齐全), 会被 _find_mdc_output 的「近期创建」判据误当成 MDC 刮削成果。
+    alt_roots = [t for t in alt_roots if t != MANUAL_ROOT]
+    x_cands = cands or _mdc_name_cands(local_dir)
+    ALL_ROOTS_AFTER = 60
     deadline = time.time() + timeout
     t0 = time.time()
     redo_paths = []
@@ -1356,10 +1396,24 @@ def _wait_mdc_scrape(local_dir, timeout=300):
                 _clean_mdc_retry(redo_paths)
                 return True, f'MDCng 原地刮削完成: {n} nfo, {i} 图片', local_dir
             # ② 移动式: 目标区出现匹配番号的刮削结果
-            ok2, found = _find_mdc_output(cands, root=target_root)
-            if ok2:
+            found = ''
+            for _root in roots:
+                _ok2, _f = _find_mdc_output(cands, root=_root)
+                if _ok2:
+                    found = _f
+                    break
+            if found:
                 _clean_mdc_retry(redo_paths)
                 return True, f'MDCng 刮削完成并移入: {found}', found
+            # ②b 跨分类兜底 (60s 起): MDC 自分类与入库分类不一致时, 主根永远扫不到
+            if x_cands and time.time() - t0 >= ALL_ROOTS_AFTER:
+                for _root in alt_roots:
+                    _ok3, _f3 = _find_mdc_output(x_cands, root=_root)
+                    if _ok3:
+                        _clean_mdc_retry(redo_paths)
+                        log.warning('[import] MDCng 产物跨分类命中(%s 不在 %s 下): %s',
+                                    local_dir, target_root, _f3)
+                        return True, f'MDCng 刮削完成并移入(跨分类): {_f3}', _f3
             # ③ 60s 仍无痕迹 → 强制重触发 (MDCng 对同路径旧文件去重)
             if not retried and time.time() - t0 > 60:
                 rp = _trigger_mdc_retry(local_dir)
@@ -1371,9 +1425,81 @@ def _wait_mdc_scrape(local_dir, timeout=300):
     finally:
         _clean_mdc_retry(redo_paths)
     _, n, i = _has_local_metadata(local_dir)
-    _ok2, found = _find_mdc_output(cands, root=target_root)
+    found = ''
+    for _root in roots + alt_roots:
+        _ok2, _f = _find_mdc_output(x_cands or cands, root=_root)
+        if _ok2:
+            found = _f
+            break
     extra = f'; 目标区未匹配' if not found else f'; 目标区: {found}'
     return False, f'MDCng 等待超时({timeout}s): 本地 {n} nfo / {i} 图片{extra} (候选番号: {", ".join(sorted(cands))[:120] or "无"})', None
+
+def _loose_dir_cands(local_dir):
+    """目录名派生的宽松候选名 —— 欧美/无标准番号的片名, _extract_fanhao_candidates 返回空,
+    此时用叶子目录名去标签后的前 2~3 段当候选 (Bangbus.20.08.19.Blake.Blossom.4k
+    → ['Bangbus.20.08.19', 'Bangbus.20.08'])。含数字且 ≥8 字符才收, 减少误配。
+    2026-09-28: 配合 _find_mdc_output_across 修「跨分类刮削产物找不到」的误判 (id=612)。"""
+    name = os.path.basename(str(local_dir or '').rstrip('/'))
+    name = re.sub(r'\[[^\]]*\]|\([^)]*\)', ' ', name)          # 去 [中文字幕] 之类标签
+    name = re.sub(r'^\s*\d+\.\s*', '', name)                   # 去「1. 」序号
+    parts = [x for x in re.split(r'[.\s_\-]+', name) if x]
+    out = []
+    for k in (3, 2):
+        if len(parts) >= k:
+            s = '.'.join(parts[:k])
+            if len(s) >= 8 and any(ch.isdigit() for ch in s) and s not in out:
+                out.append(s)
+    return out
+
+
+def _mdc_name_cands(local_dir):
+    """跨分类兜底用的匹配候选 (严格版): 标准番号候选优先, 否则只用宽松候选里最长的一条
+    (k=3, 如 Bangbus.20.08)。**不放 k=2 那条** —— 2026-09-28 实测 'Blacked.16' 会把
+    Blacked.16.11.x 错配到 Blacked.16.08.18, 是个假阳性源。"""
+    std = _extract_fanhao_candidates(local_dir)
+    if std:
+        return [c for c in std if _fanhao_key(c)]
+    loose = _loose_dir_cands(local_dir)[:1]
+    return [c for c in loose if _fanhao_key(c)]
+
+
+def _find_mdc_output_across(local_dir):
+    """跨分类兜底查找 MDC 刮削产物 (2026-09-28)。
+
+    MDCng 自己按片名/番号分流, 落点分类可能与 strm 所属分类不一致 —— 实例 id=612:
+    strm 在 待看/sehuatang(av), MDC 却刮进 已刮削/欧美/无码B 系列/BangBus.20.08.19,
+    而 _wait_mdc_scrape 只扫 已刮削/AV → 白等 180s 后被误判「MDC 未刮削或元数据不完整」,
+    面板挂「待补元数据」, 用户被迫用油猴脚本去补一份本来就刮好了的元数据。
+    返回命中的目录绝对路径或 ''; **凑不出候选名时直接放弃** (不靠「最近创建」瞎猜)。"""
+    cands = _mdc_name_cands(local_dir)
+    if not cands:
+        return ''
+    own = category_target_root(category_of_local_dir(local_dir))
+    roots = [own] + [t for _k, (_s, t, _n) in CATEGORY_MAP.items() if t != own]
+    # 2026-10-09: 杂项库排除 (手动补元数据建的目录会被「近期创建」判据误判为 MDC 成果)
+    if own != MANUAL_ROOT:
+        roots = [t for t in roots if t != MANUAL_ROOT]
+    for r in roots:
+        ok, f = _find_mdc_output(cands, root=r)
+        if ok:
+            _, nn, ii = _has_local_metadata(f)
+            if nn and ii:
+                return f
+    return ''
+
+
+def _mdc_out_matches_local(local_dir, out_dir):
+    """跨分类命中时再核一道「名字对得上」: 目录名以候选番号/片名为前缀才算同一部片。
+    防 _find_mdc_output 抓到同系列别的片子。"""
+    if not out_dir:
+        return False
+    base = _fanhao_key(os.path.basename(str(out_dir).rstrip('/')))
+    for c in _mdc_name_cands(local_dir):
+        k = _fanhao_key(c)
+        if k and (base.startswith(k) or k in base):
+            return True
+    return False
+
 
 def _mdc_pipeline_healthy(timeout=15):
     """本地版 MDCng 链路健康检查 (2026-08-27): ① mdc 容器运行 ② mdc API 9208 可达
@@ -1456,6 +1582,130 @@ def _remove_mdc_metadata(p, local_dir, savepath):
 def _trigger_emby_scan():
     """扫库触发 (Emby/Jellyfin 通用, 见上方适配层)"""
     return media_refresh(timeout=30)
+
+# ============================== 海报竖条→横图整改 (2026-09-28) ==============================
+# 用户方向(2026-09-27 傍晚定稿): 「欧美」「无码」两库的 poster.jpg 直接用完整横图(缩略图风格),
+# 不要再裁成 2:3 窄竖条 —— Emby 卡片形状按 Primary 图的长宽比决定:
+#   AR >= 1.4 → 宽卡; AR < 1.4 → 窄卡(竖条在卡片上只显示中段, 标题被切)。
+# MDC 的 crop_type_uncensored 会无条件把无码海报裁成 2:3 (id=612 BangBus.20.08.19 /
+# id=610 Blacked.16.11.21 实测复现), 全局已改成 None; 这里再兜一层"入库完成后就地整改",
+# 规则与 /root/tools/poster_to_wide.py 完全一致, 两者互为兜底。
+POSTER_WIDE_ROOTS = ('/mnt/g/srtm/已刮削/欧美', '/mnt/g/srtm/已刮削/无码')
+POSTER_WIDE_TRASH = '/mnt/g/srtm/_归档/_trash_海报换缩略图_20260927'
+
+def _img_size(path):
+    """读图片宽高: 先 PIL, 退化到 ffprobe; 都失败返回 (0, 0)"""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            return int(im.width), int(im.height)
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                              '-show_entries', 'stream=width,height', '-of', 'csv=p=0', path],
+                             capture_output=True, text=True, timeout=30).stdout.strip()
+        if ',' in out:
+            w, h = out.split(',')[:2]
+            return int(w), int(h)
+    except Exception:
+        pass
+    return 0, 0
+
+def _poster_wide_fix(dirpath):
+    """竖条 poster → 完整横图(缩略图风格)。返回 '<横图名>→poster.jpg' 或 '' (无改动)。
+
+    规则: poster 是竖的(AR < 1.4) 且 目录里有横图(thumb > fanart > backdrop, AR > 1.4)
+          且 该横图宽度 >= 原竖海报宽度(防止越换越糊) → 旧 poster 备到 TRASH, 横图 copy 成 poster.jpg
+    """
+    dirpath = (dirpath or '').rstrip('/')
+    if not dirpath or not os.path.isdir(dirpath):
+        return ''
+    # 路径级判断(不是字符串前缀), 防止 /已刮削/欧美ABC 之类误命中
+    if not any(dirpath == r.rstrip('/') or dirpath.startswith(r.rstrip('/') + os.sep) for r in POSTER_WIDE_ROOTS):
+        return ''
+    try:
+        low = {f.lower(): f for f in os.listdir(dirpath)}
+    except Exception:
+        return ''
+    if 'poster.jpg' not in low:
+        return ''
+    p_path = os.path.join(dirpath, low['poster.jpg'])
+    pw, ph = _img_size(p_path)
+    if not pw or not ph or pw / ph >= 1.4:
+        return ''
+    for cand in ('thumb.jpg', 'fanart.jpg', 'backdrop.jpg'):
+        if cand not in low:
+            continue
+        c_path = os.path.join(dirpath, low[cand])
+        cw, ch = _img_size(c_path)
+        if not cw or not ch or cw / ch <= 1.4 or cw < pw:
+            continue
+        try:
+            rel = os.path.relpath(dirpath, '/mnt/g/srtm/已刮削')
+            bak_dir = os.path.join(POSTER_WIDE_TRASH, rel)
+            bak = os.path.join(bak_dir, 'poster.jpg')
+            # 防呆: 备份路径与源同址时(异常配置)退回扁平命名, 绝不覆盖源文件
+            if os.path.abspath(bak) == os.path.abspath(p_path):
+                bak_dir = os.path.join(POSTER_WIDE_TRASH, dirpath.strip('/').replace('/', '_'))
+                bak = os.path.join(bak_dir, 'poster.jpg')
+            os.makedirs(bak_dir, exist_ok=True)
+            shutil.copy2(p_path, bak)
+            shutil.copy2(c_path, p_path)
+        except Exception as e:
+            log.warning('[poster] 竖条改横图失败 %s: %s', dirpath, str(e)[:120])
+            return ''
+        log.warning('[poster] 竖条海报改横图: %s (poster %sx%s → %s %sx%s, 旧图备份 %s)',
+                    dirpath, pw, ph, cand, cw, ch, bak)
+        return f'{cand}→poster.jpg'
+    return ''
+
+
+# ==================== 海报体检页 (/posters) 的 Emby 侧适配 (2026-09-28) ====================
+# 页面本体在 poster_page.py（不 import 本模块，避免循环）；token/host/前缀探测这些脏活留在这。
+POSTER_EMBY_LIBS = (('13731', '欧美'), ('22552', '无码'))   # Emby 库 id -> 库名
+
+
+def _poster_emby_lib_items(lib_id, limit=2000):
+    """读某库所有条目的 Path + PrimaryImageAspectRatio（用于和文件层的 AR 对照）"""
+    for srv in MEDIA_SERVERS:
+        try:
+            url = _media_url(_media_path('/Items', srv=srv), srv=srv, ParentId=lib_id,
+                             Recursive='true', IncludeItemTypes='Movie,Video',
+                             Fields='Path,PrimaryImageAspectRatio', Limit=str(limit))
+            req = urllib.request.Request(url, headers=_media_headers(srv))
+            with urllib.request.urlopen(req, timeout=40, context=ctx) as resp:
+                d = json.loads(resp.read().decode('utf-8', 'replace'))
+            return [{'Id': it.get('Id'), 'Name': it.get('Name'),
+                     'Path': it.get('Path') or '',
+                     'AR': it.get('PrimaryImageAspectRatio')} for it in d.get('Items', [])]
+        except Exception as e:
+            log.warning('[poster] 读 Emby 库 %s 失败: %s', lib_id, str(e)[:120])
+    return []
+
+
+def _poster_emby_refresh_item(item_id):
+    """无 query 的 POST /Items/{id}/Refresh：只让 Emby 重读本地文件、重算
+    PrimaryImageAspectRatio（不重下 provider 图片，免得把换好的横图又覆盖掉）。
+    这是 /root/tools/refresh_libs.py 验证过的用法。"""
+    last = None
+    for srv in MEDIA_SERVERS:
+        try:
+            url = _media_url(_media_path('/Items/%s/Refresh' % item_id, srv=srv), srv=srv)
+            req = urllib.request.Request(url, headers=_media_headers(srv), method='POST')
+            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+                return resp.status
+        except Exception as e:
+            last = e
+    raise last or RuntimeError('定向刷新无可用路由')
+
+
+def _poster_emby_adapter():
+    return {'libraries': POSTER_EMBY_LIBS,
+            'lib_items': _poster_emby_lib_items,
+            'refresh_item': _poster_emby_refresh_item,
+            'refresh_all': media_refresh}
+
 
 # ============================== 新入库预热 (2026-08-19) ==============================
 # 用户规则: 新入库视频做一次预热(首播秒开), 存量影片不做预热改造。
@@ -1822,7 +2072,12 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
         # (MDCng 对无番号资源刮削不准/易刮错, 直接走网页爬取兜底更稳)
         # 已取消自动判定: 必须由用户手工指定 kind, 'non_fanhao' 强制非番号 / 'fanhao' 强制番号
         skip_mdc = False
-        if kind == 'non_fanhao':
+        if norm_category(category) == MANUAL_CATEGORY:
+            # 2026-10-09: 杂项分类 MDC 根本不 watch → 白等 300s 必超时, 直接跳过。
+            # 期望终态就是「strm 就位 + 等帖子页手动补元数据」, 与 MDC 失败后的提示一致。
+            skip_mdc = True
+            log.info('[import] 杂项分类: 跳过 MDCng (无元数据, 等帖子页手动补)')
+        elif kind == 'non_fanhao':
             skip_mdc = True
             log.info('[import] 用户指定非番号, 跳过 MDCng 直接网页刮削')
         elif kind == 'fanhao':
@@ -1841,6 +2096,7 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
             save_task(task_id, status='running', step='nfo', msg='等待 MDCng 刮削(原地整理, 最长180s)...',
                       thread_id=thread_id, title=(title or '')[:300])
             # 2026-08-17 加固: MDCng/SmartStrm 链路不健康时直接降级网页兜底, 不白等 180s
+            cross_cat = False
             ok_h, hmsg = _mdc_pipeline_healthy()
             if not ok_h:
                 log.warning('[import] MDCng/SmartStrm 链路不健康, 跳过等待直接网页兜底: %s', hmsg)
@@ -1869,6 +2125,17 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
                     mdc_ok, mdc_msg, mdc_dir = False, 'strm 未就位(SmartStrm 失败?), 跳过 MDCng 直接网页兜底', None
                 else:
                     mdc_ok, mdc_msg, mdc_dir = _wait_mdc_scrape(local_dir)
+                    # 跨分类命中判定: MDC 产物不在本分类 已刮削/<分类> 下
+                    _own = category_target_root(category_of_local_dir(local_dir)).rstrip('/')
+                    cross_cat = bool(mdc_dir and not str(mdc_dir).startswith(_own + os.sep))
+                    if not mdc_ok:
+                        # 2026-09-28 跨分类兜底 (再补一道): 等待期内的兜底已覆盖常见情况,
+                        # 这里再按目录名全分类搜一遍 (id=612 实例: 欧美片被 MDC 刮进 已刮削/欧美)
+                        alt = _find_mdc_output_across(local_dir)
+                        if alt and _mdc_out_matches_local(local_dir, alt):
+                            mdc_ok, mdc_dir, cross_cat = True, alt, True
+                            mdc_msg = f'MDCng 刮削完成(跨分类命中, MDC 自分类与入库分类不一致): {alt}'
+                            log.warning('[import] %s', mdc_msg)
             # 完整性检查: 每个影片必须 nfo+图片都齐全, 缺一不可 (用户规则 2026-08-07)
             # 硬链接/移动整理模式下 MDC 产物在已刮削区 (mdc_dir), 本地待看区只有 strm,
             # 完整性/中文标题检查必须针对 mdc_dir, 否则误判"未刮削" (2026-08-31 修复)
@@ -1877,7 +2144,7 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
             if mdc_ok and not ok2:
                 mdc_msg = f'MDCng 刮削不完全: {meta_dir} {n2} nfo / {i2} 图片 (需两者齐全), 走浏览器兜底补全'
                 mdc_ok = False
-            elif mdc_ok and not _mdc_title_has_chinese(meta_dir):
+            elif mdc_ok and not _mdc_title_has_chinese(meta_dir) and not cross_cat:
                 # 用户规则(2026-08-11): MDCng 刮削结果标题无中文字符 → 视为刮错/不准,
                 # 删除 MDCng 元数据(本地+115), 改为网页方式爬取
                 rm = _remove_mdc_metadata(p, local_dir, savepath)
@@ -1955,6 +2222,15 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
             _ensure_dir_nfo(_local_strm_dir(savepath, category))
         except Exception as _e:
             log.warning('ensure_dir_nfo failed: %s', str(_e)[:100])
+
+        # 5.95 海报竖条→横图整改 (2026-09-28, 用户方向): 欧美/无码 库不要 2:3 窄竖条
+        #      必须在第 6 步 Emby 扫库之前做, 扫库时才算对的形状
+        try:
+            _pw = _poster_wide_fix(meta_dir)
+            if _pw:
+                log.warning('[import] 海报整改: %s %s', meta_dir, _pw)
+        except Exception as _e:
+            log.warning('[poster] 整改异常: %s', str(_e)[:120])
 
         # 6. 等 nfo/图片同步到本地 strm 目录, 再 Emby 扫库 (避免扫库时 nfo 还没同步 → 元数据缺失)
         time.sleep(15)
@@ -2419,6 +2695,126 @@ def _run_import_adopt(task_id, thread_id, number, src_dir, category, title, info
                   thread_id=str(thread_id or ''), title=(title or '')[:300])
 
 
+# ------------------- avdb 落点目录认领 (2026-09-27) -------------------
+# 背景(用户报障: 「我提交的磁力怎么不入库」): avdb 的「手动提交链接」(往界面贴磁力)
+# 写 download_log 时 number/tid/resource_name 全空 → 守护按番号去 115 认门永远认不到,
+# 记账 skipped 放行, 片子躺在 115 上永远不入库。
+# 另一类: 欧美片 avdb 番号常是四位年 (Milfy.2026.09.16), 而 115 目录名是两位年
+# (Milfy.26.09.16.Koda.Monroe…), same_number 认不出 → 同样认不到落点。
+# 这一层「按落点目录认领」直接列该记录的 save_path 目录, 用目录名推番号, 把
+# 「台账里没被认领过、且已有 >=500MB 视频」的目录接进入库。
+RE_DIR_WESTERN = re.compile(r'^([A-Za-z][A-Za-z0-9]{1,30})[.\-_ ](\d{2})[.\-_](\d{2})[.\-_](\d{2})(?![0-9])')
+RE_DIR_CODE = re.compile(r'^([A-Za-z]{2,10})[-_ ]?(\d{2,6})(?![0-9])')
+
+
+def number_from_dirname(name):
+    """从 115 目录名推番号 (手动提交的磁力只剩目录名可用):
+       Milfy.26.09.16.Koda.Monroe.… → Milfy.26.09.16
+       WeLiveTogether.22.08.15.…    → WeLiveTogether.22.08.15
+       MIDV-586-uncensored-HD       → MIDV-586
+       FC2PPV-2238344               → FC2PPV-2238344
+       其余                         → 目录名(裁 80 字符)"""
+    n = re.sub(r'[\[\](){}]', ' ', str(name or '')).strip()
+    m = RE_DIR_WESTERN.match(n)
+    if m:
+        return '%s.%s.%s.%s' % m.groups()
+    m = RE_DIR_CODE.match(n)
+    if m:
+        return '%s-%s' % m.groups()
+    return n[:80]
+
+
+def _norm_years(s):
+    """20YY → YY (欧美番号四位年 ↔ 两位年归一)"""
+    return re.sub(r'(?<=[^0-9])(20)(\d{2})(?=[^0-9]|$)', r'\2', str(s or ''))
+
+
+def _dir_key(s):
+    return re.sub(r'[^a-z0-9]', '', str(s or '').lower())
+
+
+def _loose_prefix(number, dirname):
+    """宽松同番号(前缀式): 归一化四位/两位年 + 去符号后, 目录名以番号开头。
+    防误判: 番号数字串只是目录名里更长数字串的前缀 (MIDV-58 vs MIDV-586) 不算
+    2026-09-27: 先过中央判同 (avdb_source.same_number, 已含 FC2 家族归一), 再走前缀式。"""
+    if avdb_src.same_number(number, dirname):
+        return True
+    a, b = _dir_key(_norm_years(number)), _dir_key(_norm_years(dirname))
+    if not a or not b or not b.startswith(a):
+        return False
+    if len(b) > len(a) and a[-1].isdigit() and b[len(a)].isdigit():
+        return False
+    return True
+
+
+def _claimed_dirs():
+    """台账里已被认领的 115 目录名 (任何一行写过 dir_name 即视为已认领)"""
+    out = set()
+    for r in (_avdb_seen(limit=5000) or []):
+        d = str(r.get('dir_name') or '').strip().strip('/')
+        if d:
+            out.add(d.split('/')[-1])
+    return out
+
+
+def avdb_claim_roots(p, skip='', ttl=600):
+    """avdb 落点下所有「装着片子目录」的叶子目录 (= save_path 的候补全集)。
+    2026-09-28: avdb 记录的 save_path 与实际落点会不一致 (实例: id=611 记 中文字幕/无码高清,
+    115 上实际落在 未分区/未分类) —— 按候选名兜底搜其它分区时用这份清单。
+    进程内缓存 10 分钟 (结构极少变), 避免每次兜底都重列一遍 115。"""
+    roots = _AVDB_ROOTS_CACHE.get('roots') or []
+    if not roots or time.time() - (_AVDB_ROOTS_CACHE.get('ts') or 0) > ttl:
+        roots = []
+        try:
+            tops, _ = avdb_src.list_avdb_dirs(p, '')
+            for t in tops:
+                subs, _ = avdb_src.list_avdb_dirs(p, t)
+                roots += [t + '/' + s for s in subs] if subs else [t]
+        except Exception as e:
+            log.warning('[adopt] 枚举 avdb 落点根失败: %s', str(e)[:120])
+        if roots:
+            _AVDB_ROOTS_CACHE.update({'ts': time.time(), 'roots': roots})
+    sk = str(skip or '').strip().strip('/')
+    return [r for r in roots if r.strip('/') != sk]
+
+
+def claim_dir_resolve(save_path, number='', loose_only=False, extra_names=()):
+    """按 115 落点目录认领一部片。返回 info dict (与 adopt_resolve 同形状) 或 None。
+    loose_only=True  → 只认「目录名前缀与番号一致」的目录 (番号匹配失败时的兜底)
+    loose_only=False → 认领该落点下任何未被认领、且已有大视频的目录 (手动提交的磁力)
+    extra_names: 额外候选名 (avdb 记录里的 resource_name = 磁力文件名 = 115 目录名)"""
+    save_path = str(save_path or '').strip().strip('/')
+    extra = [x for x in (extra_names or []) if x]
+    p = Push115()
+    dirs, root = avdb_src.list_avdb_dirs(p, save_path)
+    if not dirs:
+        return None
+    claimed = _claimed_dirs()
+    for name in dirs:
+        if name in claimed:
+            continue
+        if loose_only and not (_loose_prefix(number, name)
+                               or any(avdb_src.same_number(name, x) for x in extra)):
+            continue
+        try:
+            vids, total, big = _adopt_scan(p, root + '/' + name)
+        except Exception as e:
+            log.warning('[adopt] 认领列目录失败 %s/%s: %s', root, name, str(e)[:120])
+            continue
+        if not big:
+            continue          # 还没下出大文件 → 本轮不认领, 下一轮再看
+        num = (number or '') if loose_only else number_from_dirname(name)
+        try:
+            import avdb_classify as _cls
+            cat = _cls.classify(number=num, title=name)[0]
+        except Exception:
+            cat = ''
+        return {'number': num, 'magnet': '', 'article_title': '', 'section': '', 'category': cat,
+                'size_mb': round((total or 0) / 2 ** 20, 1), 'dir_115': root + '/' + name,
+                'dir_name': name, 'claimed_by': ('loose-number' if loose_only else 'dir-name')}
+    return None
+
+
 def adopt_resolve(number=None, dl_id=None):
     """解析 avdb 下载记录 → 该片在 115 的落点(只读 avdb 本地库 + 列一层 115 目录)。
     返回 dict 或 {'error': ...}"""
@@ -2441,9 +2837,45 @@ def adopt_resolve(number=None, dl_id=None):
         return {'error': '需要 number 或 id'}
     num = row.get('number') or ''
     save_path = row.get('save_path') or ''
+    # 2026-09-27: avdb 番号与 115 目录名常不同源 —— 115 目录名来自磁力里的 dn(wiki 20260316),
+    # 而 avdb 只按自己的番号规则记 (FC2-4975283 vs FC2PPV-4975283 / FC2-PPV-4571491)。
+    # resource_name 就是那条磁力/种子的文件名, 直接当第二套候选名参与判同。
+    extra = avdb_src.name_candidates(row.get('resource_name'))
+    if extra:
+        log.info('[adopt] id=%s %s 附加候选名: %s', row['id'], num or '(无番号)', extra)
     p = Push115()
-    info = avdb_src.resolve(num, p, save_path)
+    info = avdb_src.resolve(num, p, save_path, extra_names=extra) if num else {'number': ''}
+    manual = str(row.get('source') or '').startswith('manual')
     if not info.get('dir_115'):
+        # 番号为空(手动提交的磁力) 或 番号写法对不上(欧美 2026↔26 / FC2 的 PPV 写法) → 按落点目录认领 (2026-09-27)
+        # 2026-09-28: 番号为空、但记录带 resource_name 候选名的行(欧美帖天生没番号)也走认领 ——
+        # 以前只放行 manual, 用户在 avdb 点「下载」的欧美片(number 为空)一律被判 no-number 跳过(用户报障)。
+        can_claim = bool(num) or manual or bool(extra)
+        loose = bool(num) or bool(extra)
+        info2 = claim_dir_resolve(save_path, num, loose_only=loose, extra_names=extra) if can_claim else None
+        if not (info2 or {}).get('dir_115') and (num or extra):
+            # avdb 记录的 save_path 与实际落点可能不一致 (实例: 611 记 中文字幕/无码高清, 实际落在 未分区/未分类)
+            # → 按候选名到其它分区兜底搜一遍; 只认名字对得上的目录, 不盲认领
+            for r in avdb_claim_roots(p, skip=save_path):
+                info3 = claim_dir_resolve(r, num, loose_only=True, extra_names=extra)
+                if (info3 or {}).get('dir_115'):
+                    log.info('[adopt] id=%s %s → save_path 里没有, 在其它分区认领: %s',
+                             row['id'], num or '(无番号)', info3['dir_115'])
+                    info2 = info3
+                    break
+        if (info2 or {}).get('dir_115'):
+            if num:
+                info2['number'] = num        # 有番号时以 avdb 番号为准, 只借它的落点
+            log.info('[adopt] id=%s %s → 按落点目录认领: %s (%s)', row['id'], num or '(无番号)',
+                     info2['dir_115'], info2.get('claimed_by'))
+            info = info2
+    if not info.get('dir_115'):
+        if not num and (manual or extra):
+            # 没有番号的记录(手动提交的磁力 / 欧美帖): 115 上还没有落地目录 → 不是终态,
+            # 让守护记 waiting 稍后重试 (TTL 到了才放弃)
+            why = '手动提交, 等 115 下载落地' if manual else '欧美帖无番号, 等 115 下载落地'
+            return {'error': '115 落点暂无待认领目录 (%s)' % why,
+                    'waiting': True, 'number': '', 'dl_id': row['id'], 'save_path': save_path}
         return {'error': f'115 未找到 {num} 的落点目录 (avdb 记录 save_path={save_path})',
                 'number': num, 'dl_id': row['id'], 'save_path': save_path}
     info['dl_id'] = row['id']
@@ -2454,9 +2886,10 @@ def adopt_resolve(number=None, dl_id=None):
     return info
 
 
-def start_adopt(number=None, dl_id=None, category=None, title=''):
-    """提交一个 avdb 入库任务(不重新下载)。返回 task_id 或抛异常"""
-    info = adopt_resolve(number=number, dl_id=dl_id)
+def start_adopt(number=None, dl_id=None, category=None, title='', info=None):
+    """提交一个 avdb 入库任务(不重新下载)。返回 task_id 或抛异常
+    info: 已解析好的落点 (调用方刚 resolve 过就传进来, 免得再列一遍 115 目录)"""
+    info = info or adopt_resolve(number=number, dl_id=dl_id)
     if info.get('error'):
         raise RuntimeError(info['error'])
     category = norm_category(category)
@@ -2479,6 +2912,11 @@ def start_adopt(number=None, dl_id=None, category=None, title=''):
 # 面板走独立页面 /avdb + 独立接口 /api/avdb/*, 不混进 /tasks 主列表。
 AVDB_LEDGER = os.environ.get('AVDB_WATCH_DB', '/var/lib/avdb-watch/avdb_watch.db')
 AVDB_PAUSE_FILE = '/tmp/avdb_watch.pause'
+# 面板每 15s 轮询一次 /api/avdb/status: 已入库名单 (import_log status=done → 1634 个名字/查询)
+# 缓存 60s + 归一化索引, 避免每次轮询都重扫全表 (2026-09-28)
+_IMPORTED_NAMES_CACHE = {'ts': 0.0, 'rows': [], 'idx': {}, 'memo': {}}
+# avdb 落点根枚举缓存 (兜底认领用, 见 avdb_claim_roots, 2026-09-28)
+_AVDB_ROOTS_CACHE = {'ts': 0.0, 'roots': []}
 
 
 def _avdb_ledger_conn(readonly=True):
@@ -2544,9 +2982,9 @@ def _avdb_ledger_mark(dl_id, number='', dir_name='', task_id='', status='', note
         c.close()
 
 
-def _avdb_task_map():
+def _avdb_task_map(seen=None):
     """台账 task_id → 入库任务状态 (面板上点开能看到进度)"""
-    ids = [r.get('task_id') for r in _avdb_seen() if r.get('task_id')]
+    ids = [r.get('task_id') for r in (seen if seen is not None else _avdb_seen()) if r.get('task_id')]
     if not ids:
         return {}
     c = sqlite3.connect(LOG_DB)
@@ -2564,10 +3002,80 @@ def _avdb_task_map():
         c.close()
 
 
-def avdb_status():
-    """连接器面板数据。只读 avdb 本地 sqlite + 本地台账, **零网络请求**"""
+def _avdb_where(status=None, q=None):
+    """台账筛选 WHERE (2026-09-28 面板加筛选/搜索) 返回 (sql 片段, 参数)"""
+    w, a = [], []
+    s = (status or '').strip()
+    if s and s != 'all':
+        if s == 'fail':                       # 「失败」一栏: 提交失败 / 落点判定失败 / 等待超时
+            w.append("status IN ('submit_failed','adopt_failed','expired')")
+        elif s == 'missing':                  # 「未找到」一栏: 115 无落点
+            w.append("status IN ('missing','not_on_115')")
+        else:
+            w.append('status = ?')
+            a.append(s)
+    q = (q or '').strip()
+    if q:
+        w.append('(number LIKE ? OR note LIKE ? OR dir_name LIKE ?)')
+        a += ['%' + q + '%'] * 3
+    return ((' WHERE ' + ' AND '.join(w)) if w else ''), a
+
+
+def _avdb_counts(status=None, q=None):
+    """台账真实统计。
+    2026-09-28 修: 原来 total/by_status 只统计被 LIMIT 300 截断的那批, 而真实台账 605 行
+    → 面板卡片「已提交入库 148」实际是 434, 数字全失真。现在直接在 SQL 里聚合。"""
+    c = _avdb_ledger_conn()
+    if not c:
+        return {'total': 0, 'by_status': {}, 'filtered': 0}
+    try:
+        total = int(c.execute('SELECT COUNT(*) FROM seen').fetchone()[0])
+        by = {str(k or ''): int(n) for k, n in c.execute('SELECT status, COUNT(*) FROM seen GROUP BY status')}
+        where, args = _avdb_where(status, q)
+        filtered = int(c.execute('SELECT COUNT(*) FROM seen' + where, args).fetchone()[0])
+        return {'total': total, 'by_status': by, 'filtered': filtered}
+    except Exception as e:
+        log.warning('[avdb] 台账统计失败: %s', str(e)[:120])
+        return {'total': 0, 'by_status': {}, 'filtered': 0}
+    finally:
+        c.close()
+
+
+def _avdb_seen_page(status=None, q=None, limit=100, offset=0):
+    """台账分页读取 (最新在前): 支持状态筛选 + 番号/说明搜索"""
+    c = _avdb_ledger_conn()
+    if not c:
+        return []
+    try:
+        cols = [d[1] for d in c.execute('PRAGMA table_info(seen)').fetchall()]
+        if not cols:
+            return []
+        where, args = _avdb_where(status, q)
+        sql = 'SELECT %s FROM seen%s ORDER BY dl_id DESC LIMIT ? OFFSET ?' % (','.join(cols), where)
+        rows = c.execute(sql, args + [int(limit), int(offset)]).fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as e:
+        log.warning('[avdb] 台账分页读取失败: %s', str(e)[:120])
+        return []
+    finally:
+        c.close()
+
+
+def avdb_status(status=None, q=None, limit=100, offset=0):
+    """连接器面板数据。只读 avdb 本地 sqlite + 本地台账, **零网络请求**
+    2026-09-28 改版: 台账真实总数/分类统计 + 状态筛选 + 搜索 + 分页 + 待接手标注。
+    原版每次调用都要为 150 行台账线性比对 1634 个已入库名字 (6.5s/次), 而前端每 15s 轮询一次。"""
     st = _avdb_state()
-    seen = _avdb_seen()
+    try:
+        limit = max(1, min(500, int(limit)))
+    except Exception:
+        limit = 100
+    try:
+        offset = max(0, int(offset))
+    except Exception:
+        offset = 0
+    cnt = _avdb_counts(status, q)
+    seen = _avdb_seen_page(status, q, limit, offset)
     try:
         interval = int(st.get('interval') or 60)
     except Exception:
@@ -2586,63 +3094,126 @@ def avdb_status():
         max_id = avdb_src.max_download_id()
     except Exception:
         max_id = None
-    pending = []
+    pending, pending_open, stuck = [], 0, None
     if wm is not None:
         try:
+            led = {}
+            c = _avdb_ledger_conn()
+            if c:
+                try:
+                    for did, stt, tid in c.execute(
+                            'SELECT dl_id, status, task_id FROM seen WHERE dl_id > ?', (int(wm),)):
+                        led[int(did)] = (str(stt or ''), str(tid or ''))
+                finally:
+                    c.close()
             for r in avdb_src.fetch_downloads(after_id=wm, limit=100):
+                l = led.get(int(r['id']))
+                # 水位之后的记录里有一部分其实已进台账 (水位被 waiting 行挡住不推进)
+                # → 标注出来, 否则「待接手」永远不归零, 看着像连接器没干活
                 pending.append({'dl_id': r['id'], 'number': (r.get('number') or ''),
                                 'title': (r.get('title') or '')[:90],
                                 'save_path': r.get('save_path') or '',
-                                'create_time': r.get('create_time') or ''})
+                                'create_time': r.get('create_time') or '',
+                                'ledger_status': l[0] if l else '',
+                                'task_id': l[1] if l else ''})
+                if not l:
+                    pending_open += 1
         except Exception:
             pass
-    by_status = {}
-    for r in seen:
-        k = r.get('status') or ''
-        by_status[k] = by_status.get(k, 0) + 1
-    tmap = _avdb_task_map()
-    done_names = _imported_names() if any(not (r.get('task_id') or '') for r in seen) else []
+        # 水位卡住的原因: 某条手动提交的磁力还在等 115 落地 (watcher 每条最多等 3 小时)
+        c = _avdb_ledger_conn()
+        if c:
+            try:
+                row = c.execute("SELECT dl_id, wait_since, tries FROM seen "
+                                "WHERE status='waiting' AND dl_id > ? ORDER BY dl_id LIMIT 1",
+                                (int(wm),)).fetchone()
+                if row:
+                    stuck = {'dl_id': int(row[0]), 'since': row[1] or '', 'tries': int(row[2] or 0),
+                             'ttl_hours': max(1, int(os.environ.get('AVDB_WATCH_WAIT_TTL', '10800')) // 3600)}
+            except Exception:
+                pass
+            finally:
+                c.close()
+    by_status = cnt.get('by_status') or {}
+    tmap = _avdb_task_map(seen)
     for r in seen:
         t = tmap.get(r.get('task_id') or '') or {}
         r['task_status'] = t.get('status', '')
         r['task_step'] = t.get('step', '')
         r['task_msg'] = (t.get('msg') or '')[:120]
         # 台账状态为 missing/skipped(落点已迁走) → 若该番号其实已入库, 面板显示「已在库里」
+        # (2026-09-28: 改走归一化索引, 命中不了才回退宽松线性扫描)
         r['imported_task'] = ''
         if not r.get('task_id') and r.get('number'):
-            for nm, tid in done_names:
-                if avdb_src.same_number(nm, r['number']):
-                    r['imported_task'] = tid
-                    break
+            r['imported_task'] = _imported_lookup(r['number'])
     return {
         'guard': {'alive': alive, 'heartbeat': hb, 'age': age, 'interval': interval,
                   'paused': os.path.exists(AVDB_PAUSE_FILE),
                   'category': st.get('category') or 'av', 'pid': st.get('pid') or '',
                   'rounds': st.get('rounds') or ''},
         'watermark': wm, 'avdb_max_id': max_id,
-        'ledger': {'total': len(seen), 'by_status': by_status},
+        'ledger': {'total': cnt.get('total') or 0, 'by_status': by_status,
+                   'filtered': cnt.get('filtered') or 0,
+                   'status': (status or ''), 'q': (q or ''), 'limit': limit, 'offset': offset},
         'pending': pending,
         'pending_count': len(pending),
-        'seen': seen[:150],
+        'pending_open': pending_open,
+        'pending_stuck': stuck,
+        'seen': seen,
         'ledger_path': AVDB_LEDGER,
         'avdb_lib': avdb_src.AVDB_LIB,
     }
 
 
-def _imported_names():
-    """已完成入库任务的番号/名称 → [(name, task_id)]，供补扫判定「已在库里」。"""
-    out = []
+def _imported_names(ttl=60):
+    """已完成入库任务的番号/名称 → [(name, task_id)]，供补扫判定「已在库里」。
+    2026-09-28: 60 秒缓存 + (系列,数字) 归一化索引 —— 面板每 15s 轮询一次, 原来每次调用
+    都要重扫 import_log 并对每条台账记录线性比对 1634 个名字, 单次 /api/avdb/status 6.5s。"""
+    now = time.time()
+    if _IMPORTED_NAMES_CACHE['ts'] and now - _IMPORTED_NAMES_CACHE['ts'] < ttl:
+        return _IMPORTED_NAMES_CACHE['rows']
+    out, idx = [], {}
     try:
-        c = sqlite3.connect(LOG_DB)
+        c = sqlite3.connect('file:%s?mode=ro' % LOG_DB, uri=True)
         for tid, th, title, src in c.execute(
                 "SELECT task_id, thread_id, title, src_115 FROM import_log WHERE status='done'"):
             for nm in (th, title, os.path.basename((src or '').rstrip('/'))):
                 if nm:
                     out.append((str(nm), tid))
+                    k = avdb_src.number_key(nm)
+                    if k[1]:
+                        idx.setdefault(k, tid)
         c.close()
     except Exception as e:
         log.warning('_imported_names 查询失败: %s', str(e)[:120])
+    _IMPORTED_NAMES_CACHE.update({'ts': now, 'rows': out, 'idx': idx, 'memo': {}})
     return out
+
+
+def _imported_lookup(number):
+    """番号 → 已入库的 task_id。先查归一化索引, 未命中再回退宽松线性扫描 (rare path)
+    2026-09-28: 带 memo —— 回退路径要线性比对 1634 个名字 (~16ms/条), 面板每轮 51 条
+    就是 0.8s; 同一个番号的结论不会变, 缓存到下次 _imported_names 刷新为止。"""
+    if not number:
+        return ''
+    _imported_names()            # 新鲜则直接返回缓存 (内部 60s TTL), 不在库里时也能兜住
+    memo = _IMPORTED_NAMES_CACHE['memo']
+    hit = memo.get(number)
+    if hit is not None:
+        return hit
+    k = avdb_src.number_key(number)
+    res = ''
+    if k[1]:
+        res = _IMPORTED_NAMES_CACHE['idx'].get(k) or ''
+    if not res:
+        for nm, tid in _IMPORTED_NAMES_CACHE['rows']:
+            # 2026-09-28: 加 _loose_prefix 兜底 —— 欧美写法 2016↔16 的差异 same_number 不认
+            # (实例: 台账 611 的 BLACKED.2016.11.06 vs 已入库的 Blacked.16.11.06 → 面板显示不了「已在库里」)
+            if avdb_src.same_number(nm, number) or _loose_prefix(number, nm):
+                res = tid
+                break
+    memo[number] = res
+    return res
 
 
 def avdb_scan(limit=40, do_adopt=False, category='av'):
@@ -2723,7 +3294,8 @@ def avdb_scan(limit=40, do_adopt=False, category='av'):
             continue
         hit_path = None
         for path, d in _all_pairs(sp):
-            if avdb_src.same_number(d, num):
+            # 2026-09-27: 加一层宽松前缀匹配 (欧美四位年 Milfy.2026.09.16 ↔ 目录名 Milfy.26.09.16.…)
+            if avdb_src.same_number(d, num) or _loose_prefix(num, d):
                 hit_path = path
                 break
         if not hit_path:
@@ -3146,6 +3718,14 @@ def run_rescrape(task_id, thread_id, kind='web'):
                 else:
                     mdc_msg += '; 元数据仅本地(115 只存视频)'
             save_task(task_id, status='running', step='nfo', msg=mdc_msg, thread_id=thread_id, title=title[:300])
+            if mdc_ok:
+                # 海报竖条→横图整改 (2026-09-28): 重刮后同样要纠正 MDC 裁出的 2:3 窄竖条
+                try:
+                    _pw = _poster_wide_fix(meta_dir)
+                    if _pw:
+                        log.warning('[rescrape] 海报整改: %s %s', meta_dir, _pw)
+                except Exception as _e:
+                    log.warning('[poster] 整改异常: %s', str(_e)[:120])
             if not mdc_ok:
                 save_task(task_id, status='failed', step='scrape', msg='MDCng 重新刮削未成功: ' + mdc_msg,
                           thread_id=thread_id, title=title[:300])
@@ -3920,6 +4500,7 @@ tr.row-done td{background:#2386360a}
     <a class="btn sm" href="/">🚀 一键入库</a>
     <a class="btn sm cur" href="/tasks">📋 任务监控</a>
     <a class="btn sm avdb" href="/avdb">🔗 avdb 连接器</a>
+    <a class="btn sm posters" href="/posters">🖼️ 海报体检</a>
   </div>
 </div>
 <div class="container">
@@ -4051,7 +4632,10 @@ function isPendingMeta(t){
   // (import_api.py 兜底分支 save_task(status='done', step='nfo'); to_tv 分支为 step='strm')
   // 2026-09-20 修复: 此前 pct() 对 done 一律返回 100%, 面板显示「已完成/100%」却写「请补充元数据」
   // 2026-09-20 追加: t.superseded = 同一帖已有更新的成功任务 (行内「🔁 重刮」跑完) → 不再算待补
-  return t.status==='done' && t.step!=='scan' && !t.superseded;
+  // 2026-10-09 修复: kind='metadata' 的行是「用户自己点 📤 补元数据」这条动作本身,
+  // 它的 step 本来就是 'metadata' (永远 != 'scan') → 旧判据把它自己标成「待补元数据」,
+  // 于是用户补完一次、面板又多一条待补, 越补越多。它不该进这个判据。
+  return t.status==='done' && t.step!=='scan' && !t.superseded && t.kind!=='metadata';
 }
 function pct(t){
   if(t.status==='done') return isPendingMeta(t) ? {p: (STEP_PCT[t.step]||80), cls:'pending'} : {p:100, cls:'done'};
@@ -4060,6 +4644,7 @@ function pct(t){
   return {p, cls:''};
 }
 function statusCell(t){
+  if(t.kind==='metadata' && t.status==='done') return '<span class="badge done" title="元数据已写入媒体库 (海报/简介/nfo), 无需再补">已补充</span>';
   if(isPendingMeta(t)) return '<span class="badge pending_manual" title="MDC 刮削不完整: 请到帖子页用油猴脚本补充元数据">待补元数据</span>';
   if(t.status==='done' && t.step!=='scan') return '<span class="badge done" title="该帖此后已有新的成功任务 (已重刮), 旧记录不再计入待补">已完成</span>';
   return badge(t.status);
@@ -5181,9 +5766,31 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/avdb':
             self._html(AVDB_PAGE)
             return
+        if path == '/posters':
+            self._html(render_poster_page())
+            return
+        if path == '/api/posters/audit':
+            try:
+                self._json(pp_audit(emby=_poster_emby_adapter()))
+            except Exception as e:
+                log.exception('[poster] 体检扫描失败')
+                self._json({'error': '体检扫描失败: %s' % str(e)[:200]}, 500)
+            return
         if path == '/api/avdb/status':
             # avdb 连接器面板数据 (只读本地 sqlite + 台账, 零网络请求)
-            self._json(avdb_status())
+            # 2026-09-28: 支持 ?status=&q=&limit=&offset= 筛选分页
+            _p = self._parse_query()
+            _stt = (_p.get('status', ['']) or [''])[0]
+            _q = (_p.get('q', ['']) or [''])[0]
+            try:
+                _lim = int((_p.get('limit', ['100']) or ['100'])[0])
+            except Exception:
+                _lim = 100
+            try:
+                _off = int((_p.get('offset', ['0']) or ['0'])[0])
+            except Exception:
+                _off = 0
+            self._json(avdb_status(status=_stt, q=_q, limit=_lim, offset=_off))
             return
         if path == '/tasks':
             self._html(render_tasks_page())
@@ -5340,7 +5947,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(info)
                 return
             try:
-                tid = start_adopt(number=number or None, dl_id=dl_id, category=cat)
+                tid = start_adopt(number=number or None, dl_id=dl_id, category=cat, info=info)
             except Exception as e:
                 self._json({'error': str(e)[:300]}, 400)
                 return
@@ -5504,6 +6111,42 @@ class Handler(BaseHTTPRequestHandler):
             self._json({'task_id': tid, 'thread_id': str(thread_id)})
             return
 
+        if path == '/api/posters/fix':
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = json.loads(self.rfile.read(length).decode('utf-8', 'replace')) if length else {}
+            except Exception as e:
+                self._json({'error': 'bad json: ' + str(e)}, 400)
+                return
+            try:
+                data, status = pp_fix(dirs=body.get('dirs') or None,
+                                      mode=body.get('mode') or '',
+                                      emby=_poster_emby_adapter(),
+                                      refresh=body.get('refresh') or 'auto')
+            except Exception as e:
+                log.exception('[poster] 整改异常')
+                self._json({'error': '整改失败: %s' % str(e)[:200]}, 500)
+                return
+            self._json(data, status)
+            return
+        if path == '/api/posters/refresh':
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = json.loads(self.rfile.read(length).decode('utf-8', 'replace')) if length else {}
+            except Exception as e:
+                self._json({'error': 'bad json: ' + str(e)}, 400)
+                return
+            try:
+                data, status = pp_refresh(dirs=body.get('dirs') or None,
+                                          all_libs=bool(body.get('all_libs')),
+                                          emby=_poster_emby_adapter())
+            except Exception as e:
+                log.exception('[poster] 刷新异常')
+                self._json({'error': '刷新失败: %s' % str(e)[:200]}, 500)
+                return
+            self._json(data, status)
+            return
+
         if path == '/api/metadata':
             try:
                 length = int(self.headers.get('Content-Length', 0))
@@ -5591,8 +6234,313 @@ def _match_emby_tv_dir(title, thread_id):
                 return os.path.join(base, d), 'unit'
     return None, 'none'
 
+# ===== 2026-09-24 修复: /api/metadata 的 fanhao 分支 =====
+# 旧实现把图片写到 EMBY_MOVIE_ROOT/thread_<id> (已废弃的旧部署结构 /opt/media/strm/emby),
+# 而 Emby 真实库是 G:\srtm\已刮削\<分类> → 两边不通, 用户"推了元数据但 Emby 看不到";
+# 且 fanhao 分支从头到尾不写 nfo, 文本元数据无处落盘 (写 nfo 只在 non_fanhao/剧集分支)。
+# 现改为: ① 定位 已刮削/<分类>/<系列>/<条目>/ 真实目录 ② 写 movie nfo ③ 定向刷新该条目。
+
+def _category_from_any(v):
+    """分类入参归一: key('ea') / 显示名('欧美') / 大小写混写 都能认; 认不出返回 ''"""
+    s = str(v or '').strip()
+    if not s:
+        return ''
+    if s.lower() in CATEGORY_MAP:
+        return s.lower()
+    for k, (_s, _t, name) in CATEGORY_MAP.items():
+        if s == name or s == _t.rstrip('/').split('/')[-1]:
+            return k
+    return ''
+
+
+def _thread_category(thread_id):
+    """thread -> 最新分类 key (取自 import_log, 无记录回落默认 av)"""
+    try:
+        conn = sqlite3.connect(LOG_DB)
+        r = conn.execute('SELECT category FROM import_log WHERE thread_id=? AND COALESCE(category,"")<>""'
+                         ' ORDER BY rowid DESC LIMIT 1', (str(thread_id),)).fetchone()
+        conn.close()
+        if r and r[0]:
+            return norm_category(r[0])
+    except Exception as e:
+        log.warning('[metadata] 查分类失败: %s', str(e)[:100])
+    return DEFAULT_CATEGORY
+
+
+def _find_emby_movie_dir(thread_id, title='', category=None):
+    """fanhao: 定位 MDCng 刮削产物目录 已刮削/<分类>/<系列>/<条目>/。
+    ① inode 硬链接: 本地待看区 thread_<id>/ 下 .strm 的 st_ino 在目标区命中
+       (MDCng 硬链接整理后两边同一 inode, 最可靠, 不依赖能否抠出番号)
+    ② 番号候选: import_log.magnet/标题 + 本地 strm 名抠出的番号 → 目标区目录名含番号
+    无番号(欧美/素人/中文名)时②自然落空 → 返回 (None, reason), 调用方回 404,
+    绝不退化成写入旧路径 (那正是"推了没反应"的根因)。
+    返回 (dir, how); 失败 (None, reason)
+    """
+    cat = _category_from_any(category) or _thread_category(thread_id)
+    target_root = category_target_root(cat)
+    if not os.path.isdir(target_root):
+        return None, 'no-target-root:%s' % target_root
+    local_dir = _local_strm_dir('/sehuatang/%s/thread_%s' % (category_name(cat), thread_id), cat)
+
+    def _walk_strms(root):
+        for dp, dns, fns in os.walk(root):
+            if dp != root and dp[len(root):].count(os.sep) > 4:
+                dns[:] = []
+                continue
+            for fn in fns:
+                if fn.lower().endswith('.strm'):
+                    yield dp, os.path.join(dp, fn)
+
+    inos = set()
+    if os.path.isdir(local_dir):
+        for _dp, fp in _walk_strms(local_dir):
+            try:
+                st = os.stat(fp)
+            except Exception:
+                continue
+            if st.st_ino:
+                inos.add(st.st_ino)
+    if inos:
+        for dp, fp in _walk_strms(target_root):
+            try:
+                if os.stat(fp).st_ino in inos:
+                    return dp, 'inode'
+            except Exception:
+                continue
+    cands = set()
+    try:
+        conn = sqlite3.connect(LOG_DB)
+        rows = conn.execute('SELECT magnet, title FROM import_log WHERE thread_id=?'
+                            ' ORDER BY rowid DESC LIMIT 5', (str(thread_id),)).fetchall()
+        conn.close()
+        for mag, ti in rows:
+            for src in (mag or '', ti or ''):
+                for name in re.findall(r'[^|/\s]+', src):
+                    f = _fanhao_from_names([name])
+                    if f:
+                        cands.add(f)
+    except Exception as e:
+        log.warning('[metadata] 抠番号失败: %s', str(e)[:100])
+    if os.path.isdir(local_dir):
+        cands |= _extract_fanhao_candidates(local_dir)
+    keys = {_fanhao_key(c) for c in cands if c}
+    keys.discard('')
+    if keys:
+        for dp, _fp in _walk_strms(target_root):
+            base = _fanhao_key(os.path.basename(dp))
+            if base and any(k in base or base in k for k in keys):
+                return dp, 'fanhao'
+    return None, 'not-found (local=%s, inode=%d, cands=%s)' % (
+        local_dir, len(inos), ','.join(sorted(cands)[:5]) or '无')
+
+
+# ---- 2026-10-09 兜底建目录: MDC 刮不到时, 手动补元数据不再 404 ----
+# 背景: _find_emby_movie_dir 只认「MDC 已产出的目录」, 于是 MDC 刮不到的条目
+# (欧美类无番号 / 站点未收录) 恰好在最需要油猴补元数据时被堵死:
+#   ❌ 上传失败: 未定位到 Emby 电影库目录 (已刮削/<分类>)
+# 这里补上缺口: 由补元数据这一侧自己建目录 + 硬链接 strm 入库, 再走原有写图/nfo/刷新流程。
+_EA_NAME_RE = re.compile(r'(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9]{1,20})[.\-_](\d{2})[.\-_](\d{2})[.\-_](\d{2})(?![\d])')
+_EA_DATEONLY_RE = re.compile(r'^(\d{2})[.\-_](\d{2})[.\-_](\d{2})(?![\d])')
+
+
+def _fallback_entry_name(stem, title=''):
+    """兜底目录名 —— 与 MDC 命名模板 `{{number}}` 对齐, 依次尝试:
+    ① 番号 (JAV 类, _fanhao_from_names)  ② 片商.YY.MM.DD (欧美, 文件名优先/title 兜底)
+    ③ YY.MM.DD  ④ 文件名主干(截断)"""
+    def _clean(s):
+        s = _FANHAO_STRIP_PREFIX_RE.sub('', str(s or ''))
+        s = s.strip('"\' \t')
+        return re.sub(r'\.(strm|mp4|mkv|avi|wmv|mov|ts|m2ts)$', '', s, flags=re.I)
+    stem = _clean(stem)
+    title = _clean(title)
+    f = _fanhao_from_names([stem])
+    if f:
+        return f
+    for src in (stem, title):
+        if not src:
+            continue
+        m = _EA_NAME_RE.search(src)
+        if m:
+            return '%s.%s.%s.%s' % (m.group(1), m.group(2), m.group(3), m.group(4))
+    m = _EA_DATEONLY_RE.match(stem)
+    if m:
+        return '.'.join(m.groups())
+    return re.sub(r'[\\/:*?"<>|]+', '_', stem).strip()[:80]
+
+
+def _fallback_emby_movie_dir(thread_id, title='', category=None):
+    """fanhao 兜底 (2026-10-09): MDC 未产出目录时, 自己建 Emby 库目录并硬链接待看区 strm。
+
+    落点固定为「杂项」库 (已刮削/杂项/<条目名>, 平铺不加系列层) —— 用户需求:
+    杂七杂八、没有元数据、靠帖子页手动补的片子归一处, 不混进 欧美/AV。
+    例外: 国产(cn)按既有决定不进任何 Emby 库 → 直接放弃兜底 (保持原 404)。
+    硬链接保留 inode -> 之后 _find_emby_movie_dir 的 inode 匹配、以及 rescrape 仍然有效。
+    返回 (dir, how); 失败 (None, reason)
+    """
+    cat = _category_from_any(category) or _thread_category(thread_id)
+    if cat == 'cn':
+        return None, 'cn-excluded(国产不入库)'
+    target_root = MANUAL_ROOT
+    if not os.path.isdir(target_root):
+        return None, 'no-manual-root:%s' % target_root
+    local_dir = _local_strm_dir('/sehuatang/%s/thread_%s' % (category_name(cat), thread_id), cat)
+    strms = []
+    if os.path.isdir(local_dir):
+        for dp, dns, fns in os.walk(local_dir):
+            if dp != local_dir and dp[len(local_dir):].count(os.sep) > 4:
+                dns[:] = []
+                continue
+            for fn in fns:
+                if fn.lower().endswith('.strm'):
+                    strms.append(os.path.join(dp, fn))
+    if not strms:
+        return None, 'no-local-strm:%s' % local_dir
+    entry = _fallback_entry_name(os.path.splitext(os.path.basename(strms[0]))[0], title)
+    entry = re.sub(r'[\\/:*?"<>|]+', '_', entry).strip() or ('thread_%s' % thread_id)
+    target = os.path.join(target_root, entry)
+    try:
+        os.makedirs(target, exist_ok=True)
+    except Exception as e:
+        return None, 'mkdir-failed:%s' % str(e)[:80]
+    linked = copied = present = 0
+    for fp in strms:
+        dst = os.path.join(target, os.path.basename(fp))
+        # 2026-10-09 修复: 目录/strm 已在位 (上一轮兜底已建好, 或用户重复点 📤) 时
+        # 旧实现直接 continue → linked/copied 都是 0 → 判成 link-failed 回 404,
+        # 于是「第一次成功、第二次失败」, 海报永远补不上。改为: 同 inode/同大小 = 已就位。
+        if os.path.exists(dst):
+            try:
+                same = (os.stat(dst).st_ino == os.stat(fp).st_ino
+                        or os.stat(dst).st_size == os.stat(fp).st_size)
+            except OSError:
+                same = False
+            if same:
+                present += 1
+                continue
+            try:
+                os.remove(dst)          # 同名但不同内容 → 换成当前的
+            except OSError:
+                pass
+        try:
+            os.link(fp, dst)
+            linked += 1
+        except OSError:
+            try:
+                shutil.copyfile(fp, dst)
+                copied += 1
+            except Exception as e:
+                log.warning('[metadata] 兜底拷 strm 失败 %s: %s', fp, str(e)[:80])
+    if not linked and not copied and not present:
+        return None, 'link-failed:%s' % target
+    log.warning('[metadata] fanhao 兜底建目录(MDC 未产出) -> 杂项: thread=%s (%s) -> %s '
+                '(hardlink=%d copy=%d existing=%d)', thread_id, cat, target, linked, copied, present)
+    return target, 'fallback-created(hardlink=%d,copy=%d%s)' % (
+        linked, copied, ',existing=%d' % present if present else '')
+
+
+def _split_multi(v):
+    """'a,b/c' 或 ['a','b'] -> ['a','b'] (标签/演员等多次值入参)"""
+    if not v:
+        return []
+    if isinstance(v, (list, tuple)):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return [x.strip() for x in re.split(r'[,，/、|]+', str(v)) if x.strip()]
+
+
+def _movie_nfo_xml(title, desc, thread_id, num='', studio='', release='', tags=None, actors=None):
+    """movie 风格 nfo (Emby 电影库: 与 strm 同名, 或 movie.nfo)"""
+    import xml.sax.saxutils as _sax
+    esc = lambda s: _sax.escape(str(s or ''))
+    L = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>', '<movie>']
+    if title:
+        L.append('  <title>%s</title>' % esc(title))
+    if desc:
+        L.append('  <plot>%s</plot>' % esc(desc))
+    if num:
+        L.append('  <num>%s</num>' % esc(num))
+    if studio:
+        L.append('  <studio>%s</studio>' % esc(studio))
+    if release:
+        L.append('  <release>%s</release>' % esc(release))
+    for t in (tags or []):
+        L.append('  <tag>%s</tag>' % esc(t))
+    for a in (actors or []):
+        n = a.get('name') if isinstance(a, dict) else a
+        if str(n or '').strip():
+            L.append('  <actor><name>%s</name></actor>' % esc(n))
+    if thread_id:
+        L.append('  <uniqueid type="sehuatang" default="true">%s</uniqueid>' % esc(thread_id))
+    L.append('</movie>')
+    return '\n'.join(L) + '\n'
+
+
+def _write_movie_nfo(target, body, title, desc, thread_id):
+    """fanhao: 写 movie nfo —— 目录内每个 .strm 的同名 nfo + 已存在的 nfo(覆盖, 清掉刮错的数据)。
+    入参可选: num/fanhao, studio, release/year, tags/genres, actors。返回写入的文件名列表。"""
+    try:
+        entries = os.listdir(target)
+    except Exception:
+        return []
+    stems = [os.path.splitext(f)[0] for f in entries if f.lower().endswith('.strm')]
+    existing = [f for f in entries if f.lower().endswith('.nfo')]
+    cand = [s + '.nfo' for s in stems] + existing
+    if not cand:
+        cand = ['movie.nfo']
+    xml = _movie_nfo_xml(
+        title, desc, thread_id,
+        num=body.get('num') or body.get('fanhao') or '',
+        studio=body.get('studio') or '',
+        release=body.get('release') or body.get('year') or '',
+        tags=_split_multi(body.get('tags') or body.get('genres')),
+        actors=body.get('actors') or _split_multi(body.get('actor')),
+    )
+    saved, seen = [], set()
+    for fn in cand:
+        if fn in seen:
+            continue
+        seen.add(fn)
+        try:
+            with open(os.path.join(target, fn), 'w', encoding='utf-8') as fh:
+                fh.write(xml)
+            saved.append(fn)
+        except Exception as e:
+            log.warning('[metadata] 写 nfo %s 失败: %s', fn, str(e)[:100])
+    return saved
+
+
+def _refresh_emby_path(target, full=True, timeout=20):
+    """按路径找 Emby/Jellyfin 条目并定向刷新 (full=True 时强制重读 nfo/图)。
+    返回刷新成功的条目数; 失败不抛 (全库扫库由调用方 media_refresh 兜底)。"""
+    n = 0
+    for srv in MEDIA_SERVERS:
+        try:
+            items = _emby_items_by_path_prefix(target, srv=srv)
+        except Exception as e:
+            log.warning('[metadata] 查条目失败(%s): %s', srv.get('name'), str(e)[:100])
+            continue
+        for it in items:
+            iid = it.get('Id')
+            if not iid:
+                continue
+            q = {'MetadataRefreshMode': 'FullRefresh' if full else 'Default',
+                 'ImageRefreshMode': 'FullRefresh', 'ReplaceAllImages': 'true'}
+            if full:
+                q['ReplaceAllMetadata'] = 'true'
+            try:
+                url = _media_url(_media_path('/Items/%s/Refresh' % iid, srv=srv), srv=srv, **q)
+                req = urllib.request.Request(url, headers=_media_headers(srv), method='POST')
+                with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                    if resp.status == 204:
+                        n += 1
+                log.info('[metadata] 定向刷新条目 %s (%s)', iid, (it.get('Name') or '')[:40])
+            except Exception as e:
+                log.warning('[metadata] 定向刷新失败 %s: %s', iid, str(e)[:100])
+    return n
+
+
 def _handle_metadata(body):
-    """保存海报/图片 + 写 tvshow.nfo + 触发 Emby 刷新。body: {thread_id,title,desc,kind,images}"""
+    """保存海报/图片 + 写 nfo + 触发 Emby 刷新。body: {thread_id,title,desc,kind,images,
+    可选: category,num/studio/release/tags/actors}"""
     import base64 as _b64
     thread_id = str(body.get('thread_id') or '').strip()
     title = (body.get('title') or '').strip()
@@ -5639,12 +6587,20 @@ def _handle_metadata(body):
                         thread_id, title[:30], len(cands))
             return {'error': f'未匹配到 Emby 剧集目录 (thread={thread_id}, title={title[:30]})', 'candidates': cands}, 404
     else:
-        target = os.path.join(EMBY_MOVIE_ROOT, f'thread_{thread_id}')
-        if os.path.isdir(target):
-            subs = [d for d in os.listdir(target) if os.path.isdir(os.path.join(target, d))]
-            if len(subs) == 1:
-                target = os.path.join(target, subs[0])
-        how = 'movie'
+        # 2026-09-24 修复: 改为定位 Emby 真实库目录 已刮削/<分类>/<系列>/<条目>/
+        # (旧实现写 EMBY_MOVIE_ROOT/thread_<id> 废弃结构 → 图片 Emby 收不到, 且不写 nfo)
+        target, how = _find_emby_movie_dir(thread_id, title, body.get('category'))
+        if not target:
+            log.warning('[metadata] fanhao 未定位到条目目录: thread=%s title=%s (%s); 走兜底建目录',
+                        thread_id, title[:30], how)
+            # 2026-10-09: MDC 刮不到 (欧美无番号/站点未收录) 时不再直接 404 ——
+            # 在「杂项」库下自建目录 + 硬链接 strm, 继续走写图/nfo/刷新流程。
+            target, how2 = _fallback_emby_movie_dir(thread_id, title, body.get('category'))
+            if not target:
+                log.warning('[metadata] fanhao 兜底建目录失败: thread=%s (%s)', thread_id, how2)
+                return {'error': '未定位到 Emby 电影库目录 (已刮削/<分类>): thread=%s title=%s' % (
+                    thread_id, title[:30]), 'reason': how, 'fallback': how2}, 404
+            how = 'planned-by-fallback(%s; was %s)' % (how2, how)
     os.makedirs(target, exist_ok=True)
     saved = []
     poster_written = False
@@ -5693,18 +6649,37 @@ def _handle_metadata(body):
             saved.append('tvshow.nfo')
         except Exception as e:
             log.warning('[metadata] 写 nfo 失败: %s', str(e)[:100])
+    else:
+        # fanhao: 写 movie nfo (覆盖刮错的旧 nfo) —— 旧实现此处完全缺失, 文本元数据没落盘
+        saved.extend(_write_movie_nfo(target, body, title, desc, thread_id))
+    # 定向刷新 (2026-09-24 新增): 让 Emby 立刻重读该条目的 nfo/图片, 比等全库扫库更准
+    items_refreshed = 0
+    if saved:
+        items_refreshed = _refresh_emby_path(target, full=True)
     refreshed = False
     try:
         refreshed = media_refresh(timeout=10) == 204
     except Exception as e:
         log.warning('[metadata] 媒体库刷新触发失败(Emby/Jellyfin): %s', str(e)[:100])
+    # 2026-10-09: 兜底新建的目录 Emby 还没扫到 → 第一次定向刷新必然 0 命中。
+    # 扫库广播之后再补一次定向刷新, 让海报/简介当场生效, 不用等用户手动刷新。
+    if saved and not items_refreshed and refreshed:
+        for _try in range(3):
+            time.sleep(2)
+            try:
+                items_refreshed = _refresh_emby_path(target, full=True)
+            except Exception as _e:
+                log.warning('[metadata] 二次定向刷新异常: %s', str(_e)[:80])
+                break
+            if items_refreshed:
+                break
     # 预热 (2026-08-20): 用户补充元数据后对新条目做媒体信息预探测 → 首播秒开。
     # 影片成功路径 (MDC 刮削) 已在入库流程预热; 此处覆盖 MDC 失败/剧集等待油猴补充的场景。
     try:
         t_task, t_title = None, title or ''
         try:
             cc = sqlite3.connect(LOG_DB)
-            rr = cc.execute('SELECT task_id, title FROM import_log WHERE thread_id=? AND title IS NOT NULL AND title!=\'\' ORDER BY created_at DESC LIMIT 1',
+            rr = cc.execute('SELECT task_id, title FROM import_log WHERE thread_id=? AND title IS NOT NULL AND title!=\'\' AND IFNULL(kind,\'\')<>\'metadata\' ORDER BY created_at DESC LIMIT 1',
                             (thread_id,)).fetchone()
             cc.close()
             if rr:
@@ -5717,16 +6692,19 @@ def _handle_metadata(body):
             _start_prewarm(target, t_task, t_title or f'thread_{thread_id}')
     except Exception as e:
         log.warning('[metadata] 预热启动失败: %s', str(e)[:120])
-    log.info('[metadata] thread=%s kind=%s dir=%s how=%s files=%s refresh=%s',
-             thread_id, kind, target, how, saved, refreshed)
+    log.info('[metadata] thread=%s kind=%s dir=%s how=%s files=%s refresh=%s items=%s',
+             thread_id, kind, target, how, saved, refreshed, items_refreshed)
     # 写入任务监控 (2026-08-20): 独立一条记录, 用户可在 /tasks 页面看到每次元数据上传
     try:
         save_task(uuid.uuid4().hex[:12], status='done', step='metadata',
-                  msg=f'📤 元数据补充: {len(saved)} 个文件' + ('，已触发 Emby 刷新' if refreshed else ''),
+                  msg=f'📤 元数据补充: {len(saved)} 个文件'
+                      + (f'，已定向刷新 {items_refreshed} 个条目' if items_refreshed else '')
+                      + ('，已触发 Emby 扫库' if refreshed else ''),
                   thread_id=thread_id, title=(title or f'thread_{thread_id}')[:300], kind='metadata')
     except Exception as e:
         log.warning('[metadata] 写监控记录失败: %s', str(e)[:100])
-    return {'ok': True, 'dir': target, 'matched': how, 'files': saved, 'refreshed': refreshed}, 200
+    return {'ok': True, 'dir': target, 'matched': how, 'files': saved,
+            'refreshed': refreshed, 'items_refreshed': items_refreshed}, 200
 
 
 # ============================== Emby 删除 → 115 删除同步 (2026-08-20) ==============================
