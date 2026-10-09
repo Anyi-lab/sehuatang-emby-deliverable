@@ -8,3 +8,7 @@ import_api.db
 *.bak-*
 *.bak*
 node_modules/
+
+# 本地备份/一次性数据产物（不入库）
+_backup/
+data/*.jsonl

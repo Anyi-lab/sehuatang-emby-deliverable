@@ -1,0 +1,14 @@
+[Unit]
+Description=115 STRM relay portproxy refresh (Windows 0.0.0.0:11501 -> WSL)
+After=network-online.target strm-relay.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /root/clacky_workspace/sehuatang-emby-deliverable/scripts/strm_relay_portproxy.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

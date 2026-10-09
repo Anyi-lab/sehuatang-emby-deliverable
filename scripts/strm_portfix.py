@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-strm_portfix.py —— 批量把 .strm 内容里的上游端口 11500 改成 11501（本地中转）
+strm_portfix.py —— 批量把 .strm 内容里的上游端口 11501（旧中继）改回 11500（115-Desktop 直发）
 
-背景（2026-09-24 实测 A/B）：
+背景（2026-09-24 实测 A/B，2026-09-25 收口）：
   strm 内容 http://192.168.2.238:11500/d/<pickcode>/<name>
      → 115-Desktop 的 /d/ 是「下载」路由，恒 302 到 115 CDN 直链，直链签名绑定请求方 UA
-     → Emby 取流用 RodelPlayer/ffprobe UA ≠ 取链 UA → 403 → Emby 返回 500 Forbidden（只有个别条目能播）
+     → 早期 Emby 取流不带 UA → 403 → 500；现已由插件 Emby.StrmUaFix 补 UA，实测 206 ✅（当前默认）
   strm 内容 http://192.168.2.238:11501/d/<pickcode>/<name>
-     → 落到 strm_relay.py（固定 UA 取链 + 取流 + 断点续传 + 重取链）→ Emby 206 + video/mp4
+     → 落到 strm_relay.py（固定 UA 取链 + 取流 + 断点续传 + 重取链）→ Emby 206（旧方案，保留作回退）
 
 本脚本只改端口，不动路径（/d/ 保留）、不动 host、不动文件名编码。
 原地改（r+ 截断）→ 保留 inode，硬链接副本同步生效。
@@ -17,7 +17,7 @@ strm_portfix.py —— 批量把 .strm 内容里的上游端口 11500 改成 115
 用法：
   python3 scripts/strm_portfix.py --root /mnt/g/srtm                    # dry-run（默认）
   python3 scripts/strm_portfix.py --root /mnt/g/srtm --apply
-  python3 scripts/strm_portfix.py --root /mnt/g/srtm --apply --from-port 11501 --to-port 11500   # 回滚
+  python3 scripts/strm_portfix.py --root /mnt/g/srtm --apply --from-port 11500 --to-port 11501   # 反向（切回中继）
 """
 import argparse
 import json
@@ -45,8 +45,8 @@ def iter_strm(root, limit=500000):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', action='append', required=True, help='strm 根目录，可多次')
-    ap.add_argument('--from-port', type=int, default=11500)
-    ap.add_argument('--to-port', type=int, default=11501)
+    ap.add_argument('--from-port', type=int, default=11501)
+    ap.add_argument('--to-port', type=int, default=11500)
     ap.add_argument('--apply', action='store_true', help='缺省只 dry-run')
     ap.add_argument('--journal', default=None)
     a = ap.parse_args()

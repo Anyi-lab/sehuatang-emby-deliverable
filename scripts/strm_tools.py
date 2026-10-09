@@ -31,8 +31,9 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 MANIFEST_PATH = os.path.join(DATA_DIR, 'strm_manifest.json')
 SCHEDULE_PATH = os.path.join(DATA_DIR, 'strm_schedules.json')
 
-# strm 内容形如 http://192.168.2.238:11501/d/<pickcode>/<url编码文件名>
-#   (11501 = 本地中继 strm-relay；直发 :11500/d/ 恒 302 且签名绑 UA → Emby 403)
+# strm 内容形如 http://192.168.2.238:11500/d/<pickcode>/<url编码文件名>
+#   (11500 = 115-Desktop 直发地址，/d/ 恒 302 → CDN 直链，签名绑 UA；
+#    Emby 取流侧 UA 由插件 Emby.StrmUaFix 补齐 → 206。中继 :11501 保留作回退)
 RE_AUTH = re.compile(r'(?P<scheme>https?://)(?P<host>[^/:\s]+)(?::(?P<port>\d+))?')
 RE_PICKCODE = re.compile(r'/(?:d|play|strm)/([0-9a-z]{8,})/')
 
@@ -323,9 +324,10 @@ class Scheduler:
 
 
 # ------------------------------------------------------------------ 杂项
-# 注意：2026-09-24 起 strm 默认端口改为 11501（本地中继 strm-relay），
-# 因为 115-Desktop 直发地址 :11500/d/ 恒 302 且 CDN 直链签名绑 UA → Emby 403。
-# 想切回直连（Jellyfin 客户端直连 / 神医助手独占模式）用环境变量 STRM_HOST 覆盖。
+# 注意：2026-09-25 起 strm 默认端口回到 11500（115-Desktop 直发地址，/d/ 302 → CDN 直链）。
+# 09-24 曾因 Emby 取流不带 UA 导致直链签名 403 而改用本地中继 11501，
+# 该问题已由插件 Emby.StrmUaFix（补齐取流 UA）解决，故回滚为直连。
+# 想切回中继：环境变量 STRM_HOST=http://192.168.2.238:11501 覆盖。
 def local_host():
     """当前 strm 用的 host（默认走 115-Desktop 的局域网地址）"""
     try:
@@ -337,9 +339,9 @@ def local_host():
             s.connect(('8.8.8.8', 80))
             ip = s.getsockname()[0]
             s.close()
-            return ip + ':11501'
+            return ip + ':11500'
         except Exception:
-            return '192.168.2.238:11501'
+            return '192.168.2.238:11500'
 
 
 def build_strm_url(host, pc, name):
@@ -348,11 +350,11 @@ def build_strm_url(host, pc, name):
     if host in (None, '', 'current'):
         base = local_host()
     elif host == 'localhost':
-        base = '127.0.0.1:11501'
+        base = '127.0.0.1:11500'
     else:
         base = host.strip()
     if '://' in base:
         base = base.split('://', 1)[1]
     if ':' not in base:
-        base += ':11501'
+        base += ':11500'
     return 'http://%s/d/%s/%s' % (base, pc, urllib.parse.quote(name))

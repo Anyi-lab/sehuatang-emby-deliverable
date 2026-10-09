@@ -556,6 +556,7 @@ ul.list li .nm.dir:hover{text-decoration:underline}
 ul.list li .nm.file{cursor:pointer}
 ul.list li .nm.file:hover{color:var(--acc2)}
 ul.list li .sz{color:var(--dim);font-size:11.5px;font-variant-numeric:tabular-nums;flex:0 0 auto;min-width:74px;text-align:right}
+ul.list li .tm{color:var(--dim);font-size:11.5px;font-variant-numeric:tabular-nums;flex:0 0 auto;min-width:92px;text-align:right;opacity:.85}
 ul.list li .rowact{opacity:0;transition:opacity .12s;flex:0 0 auto}
 ul.list li:hover .rowact{opacity:1}
 .list-foot{display:flex;align-items:center;gap:10px;padding:9px 12px;border-top:1px solid var(--line);
@@ -637,6 +638,7 @@ kbd{background:var(--card2);border:1px solid var(--line2);border-bottom-width:2p
   .tabs{overflow-x:auto}
   .card-body{padding:12px}
   ul.list li .sz{display:none}
+  ul.list li .tm{display:none}
   .top{padding:10px 0}
 }
 
@@ -748,10 +750,10 @@ kbd{background:var(--card2);border:1px solid var(--line2);border-bottom-width:2p
               <label for="urlhost">strm 里的地址</label>
               <select id="urlhost">
                 <option value="current">局域网（当前 __HOST__）</option>
-                <option value="localhost">本机 127.0.0.1:11501（只有本机能播）</option>
+                <option value="localhost">本机 127.0.0.1:11500（只有本机能播）</option>
                 <option value="custom">自定义…</option>
               </select>
-              <input type="text" id="hostcustom" placeholder="192.168.1.200 或 host:11501"
+              <input type="text" id="hostcustom" placeholder="192.168.1.200 或 host:11500"
                      spellcheck="false" style="display:none">
             </div>
             <div class="field">
@@ -799,16 +801,21 @@ kbd{background:var(--card2);border:1px solid var(--line2);border-bottom-width:2p
           </label>
           <label class="hint" for="sortBy">排序</label>
           <select id="sortBy" onchange="renderList()" style="width:auto">
-            <option value="dir">目录优先</option>
             <option value="name">按名称</option>
+            <option value="time">按时间（新→旧）</option>
             <option value="size">按体积（大→小）</option>
           </select>
+          <label class="switch" for="dirFirst" title="目录排在最前，目录与文件各自再按上面的规则排">
+            <input type="checkbox" id="dirFirst" checked onchange="renderList()">
+            <span class="track"></span><span>目录优先</span>
+          </label>
           <span class="hint" style="margin-left:auto" id="liststat"></span>
         </div>
         <div class="list-head">
           <span style="width:15px"></span>
           <span style="flex:1">名称</span>
           <span style="width:120px">状态</span>
+          <span style="width:92px;text-align:right">时间</span>
           <span style="width:74px;text-align:right">大小</span>
         </div>
         <ul class="list" id="list"></ul>
@@ -1032,6 +1039,20 @@ const DEF_HOST = '__HOST__';
 const DEF_EXTS = '__EXTS__';
 const esc = s => (s == null ? '' : String(s)).replace(/[&<>"]/g, m => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[m]));
 const gb = n => (n ? (n / 1073741824).toFixed(2) + ' GB' : '');
+/* 115 upt（unix 秒）-> 'MM-DD HH:MM'；无值返回 '' */
+function ts(sec) {
+  if (!sec) return '';
+  const d = new Date(sec * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function tsFull(sec) {
+  if (!sec) return '115 未返回时间';
+  const d = new Date(sec * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' '
+    + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 
 function toast(title, detail, kind) {
@@ -1089,7 +1110,7 @@ function toggleTheme() {
 })();
 
 /* ========================= 设置记忆 / 标签页 / 状态条 ========================= */
-const SET_IDS = ['root', 'cat', 'layout', 'name', 'depth', 'minmb', 'exts', 'urlhost', 'hostcustom', 'metaexts', 'onlyNew', 'sortBy', 'fxDir', 'clDirs'];
+const SET_IDS = ['root', 'cat', 'layout', 'name', 'depth', 'minmb', 'exts', 'urlhost', 'hostcustom', 'metaexts', 'onlyNew', 'sortBy', 'dirFirst', 'fxDir', 'clDirs'];
 function saveSettings() {
   const o = {};
   SET_IDS.forEach(id => { const el = $(id); if (!el) return; o[id] = el.type === 'checkbox' ? el.checked : el.value; });
@@ -1103,6 +1124,7 @@ function loadSettings() {
     const el = $(id); if (!el || o[id] === undefined) return;
     if (el.type === 'checkbox') el.checked = !!o[id];
     else if (id === 'cat' && !CATS.some(c => c[0] === o[id])) return;
+    else if (id === 'sortBy' && !Array.prototype.some.call(el.options, op => op.value === o[id])) return;
     else el.value = o[id];
   });
 }
@@ -1263,12 +1285,16 @@ function renderList() {
     rows = rows.filter(e => !e.is_dir && !e.have_strm);
     hidden = before - rows.length;
   }
-  const cmp = {
-    dir: (a, b) => (a.is_dir !== b.is_dir) ? (a.is_dir ? -1 : 1) : a.name.localeCompare(b.name, 'zh'),
+  const by = {
     name: (a, b) => a.name.localeCompare(b.name, 'zh'),
+    time: (a, b) => (b.mtime || 0) - (a.mtime || 0) || a.name.localeCompare(b.name, 'zh'),
     size: (a, b) => (b.size || 0) - (a.size || 0) || a.name.localeCompare(b.name, 'zh')
-  }[sort];
-  if (cmp) rows.sort(cmp);
+  }[sort] || ((a, b) => a.name.localeCompare(b.name, 'zh'));
+  const dirFirst = $('dirFirst').checked;
+  const cmp = dirFirst
+    ? (a, b) => (a.is_dir !== b.is_dir) ? (a.is_dir ? -1 : 1) : by(a, b)
+    : by;
+  rows.sort(cmp);
   view = rows.slice(0, MAXR);
   const ul = $('list'); ul.innerHTML = '';
   view.forEach(e => ul.appendChild(rowEl(e)));
@@ -1303,6 +1329,9 @@ function rowEl(e) {
     tags.appendChild(b);
   }
   li.appendChild(tags);
+  const tm = document.createElement('span');
+  tm.className = 'tm'; tm.textContent = ts(e.mtime); tm.title = tsFull(e.mtime);
+  li.appendChild(tm);
   const sz = document.createElement('span'); sz.className = 'sz'; sz.textContent = gb(e.size);
   li.appendChild(sz);
   const act = document.createElement('span'); act.className = 'rowact';
@@ -1729,6 +1758,7 @@ class H(BaseHTTPRequestHandler):
             o = origins.get(src_root)
             out.append({'name': e['fn'], 'path': p, 'is_dir': e['is_dir'],
                         'size': e['size'] if is_video else 0, 'video': is_video,
+                        'mtime': int(e.get('upt') or 0),
                         'have_strm': is_video and (os.path.splitext(e['fn'])[0] + '.strm') in have_set,
                         'self_origin': (o or {}).get('origin'), 'self_count': (o or {}).get('count')})
         out.sort(key=lambda x: (not x['is_dir'], x['name']))

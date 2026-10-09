@@ -1,0 +1,20 @@
+[Unit]
+Description=115 STRM local relay (strm_relay.py, port 11501)
+Documentation=file:///root/clacky_workspace/sehuatang-emby-deliverable/scripts/strm_relay.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/clacky_workspace/sehuatang-emby-deliverable/scripts
+ExecStart=/usr/bin/python3 /root/clacky_workspace/sehuatang-emby-deliverable/scripts/strm_relay.py --host 0.0.0.0 --port 11501
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:/var/log/strm_relay.log
+StandardError=append:/var/log/strm_relay.log
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
