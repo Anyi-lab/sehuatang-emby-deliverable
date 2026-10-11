@@ -1741,7 +1741,7 @@ def _emby_items_by_path_prefix(prefix, srv=None):
     路径按 Windows/WSL 两种写法归一化后比较。"""
     url = _media_url(_media_path('/Items', srv=srv), srv=srv,
                      Recursive='true', IncludeItemTypes='Movie,Episode',
-                     Fields='Path', Limit='5000')
+                     Fields='Path,ImageTags', Limit='5000')
     req = urllib.request.Request(url, headers=_media_headers(srv))
     with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
         d = json.loads(resp.read().decode('utf-8', 'replace'))
@@ -6508,10 +6508,80 @@ def _write_movie_nfo(target, body, title, desc, thread_id):
     return saved
 
 
+def _emby_item_primary(iid, srv=None):
+    """条目当前有没有主图(Primary)。True/False; 查询失败/查不到返回 None (=未知, 不触发兜底)。
+    注意: Emby 4.10 没有 GET /Items/{id} (会 404), 单条目必须点名查 /Items?Ids=<id>。"""
+    try:
+        url = _media_url(_media_path('/Items', srv=srv), srv=srv, Ids=iid, Fields='ImageTags')
+        req = urllib.request.Request(url, headers=_media_headers(srv))
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+            d = json.loads(resp.read().decode('utf-8', 'replace'))
+        items = d.get('Items') or []
+        if not items:
+            log.warning('[metadata] 查主图: 条目 %s 查不到', iid)
+            return None
+        return 'Primary' in (items[0].get('ImageTags') or {})
+    except Exception as e:
+        log.warning('[metadata] 查主图失败 %s: %s', iid, str(e)[:80])
+        return None
+
+
+def _refresh_emby_item_image(iid, srv=None, timeout=25):
+    """只补缺图的一次刷新: 不覆盖已有图 + 显式放行 ffmpeg 截帧。
+    2026-10-11 实测: 不带 AllowFfProcess 时 Emby 会静默跳过 Image Capture, 一个字节都不写;
+    带上之后 1s 内拉起 ffmpeg、2s 内写 poster.jpg。"""
+    q = {'MetadataRefreshMode': 'Default', 'ImageRefreshMode': 'Default',
+         'ReplaceAllImages': 'false', 'AllowFfProcess': 'true'}
+    url = _media_url(_media_path('/Items/%s/Refresh' % iid, srv=srv), srv=srv, **q)
+    req = urllib.request.Request(url, headers=_media_headers(srv), method='POST')
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        return resp.status == 204
+
+
+def _missing_poster_worker(todo, tries=3):
+    """后台线程: 对缺主图的条目复查 + 重试补图。
+    115 取流约 1/3 概率读到坏数据 (抽帧可能一个字节都没写), 所以必须重试;
+    串行执行, 避免同时拉多个 ffmpeg 打爆 115 客户端。"""
+    for iid, name, srv in todo:
+        ok = False
+        for k in range(tries):
+            time.sleep(8 if k == 0 else 12)
+            if _emby_item_primary(iid, srv=srv) is True:
+                log.info('[metadata] 缺图兜底: %s (%s) 已有主图, 无需补', iid, name[:30])
+                ok = True
+                break
+            try:
+                _refresh_emby_item_image(iid, srv=srv)
+            except Exception as e:
+                log.warning('[metadata] 缺图兜底刷新失败 %s 第%d次: %s', iid, k + 1, str(e)[:80])
+                continue
+            time.sleep(6)
+            if _emby_item_primary(iid, srv=srv) is True:
+                log.info('[metadata] 缺图兜底成功 %s (%s) 第%d次截帧出图', iid, name[:30], k + 1)
+                ok = True
+                break
+        if not ok:
+            log.warning('[metadata] 缺图兜底未成功 %s (%s): 已重试 %d 次, 留待下次刷新',
+                        iid, name[:30], tries)
+
+
+def _start_missing_poster_fix(todo):
+    """启动缺图兜底后台线程, 不阻塞 /api/metadata 响应。todo: [(item_id, name, srv), ...]"""
+    if not todo:
+        return
+    try:
+        threading.Thread(target=_missing_poster_worker, args=(todo,), daemon=True).start()
+        log.info('[metadata] 缺图兜底: 启动 %d 条', len(todo))
+    except Exception as e:
+        log.warning('[metadata] 缺图兜底启动失败: %s', str(e)[:120])
+
+
 def _refresh_emby_path(target, full=True, timeout=20):
     """按路径找 Emby/Jellyfin 条目并定向刷新 (full=True 时强制重读 nfo/图)。
-    返回刷新成功的条目数; 失败不抛 (全库扫库由调用方 media_refresh 兜底)。"""
+    返回刷新成功的条目数; 失败不抛 (全库扫库由调用方 media_refresh 兜底)。
+    缺主图的条目会额外放行 ffmpeg (AllowFfProcess) 并交给后台兜底线程重试补图。"""
     n = 0
+    missing = []
     for srv in MEDIA_SERVERS:
         try:
             items = _emby_items_by_path_prefix(target, srv=srv)
@@ -6522,19 +6592,29 @@ def _refresh_emby_path(target, full=True, timeout=20):
             iid = it.get('Id')
             if not iid:
                 continue
+            has_pic = 'Primary' in (it.get('ImageTags') or {})
             q = {'MetadataRefreshMode': 'FullRefresh' if full else 'Default',
                  'ImageRefreshMode': 'FullRefresh', 'ReplaceAllImages': 'true'}
             if full:
                 q['ReplaceAllMetadata'] = 'true'
+            # 2026-10-11 根因修复: 缺主图时必须显式放行 ffmpeg, 否则 Emby 静默跳过
+            # "Image Capture 从视频截一帧", 条目永远没封面 (已带对照实验复现)。
+            # 已有主图的条目不放行, 免得把刚上传的官方海报覆盖成截帧。
+            if not has_pic:
+                q['AllowFfProcess'] = 'true'
             try:
                 url = _media_url(_media_path('/Items/%s/Refresh' % iid, srv=srv), srv=srv, **q)
                 req = urllib.request.Request(url, headers=_media_headers(srv), method='POST')
                 with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
                     if resp.status == 204:
                         n += 1
-                log.info('[metadata] 定向刷新条目 %s (%s)', iid, (it.get('Name') or '')[:40])
+                        if not has_pic:
+                            missing.append((iid, it.get('Name') or '', srv))
+                log.info('[metadata] 定向刷新条目 %s (%s)%s', iid, (it.get('Name') or '')[:40],
+                         '' if has_pic else ' [缺主图→放行截帧]')
             except Exception as e:
                 log.warning('[metadata] 定向刷新失败 %s: %s', iid, str(e)[:100])
+    _start_missing_poster_fix(missing)
     return n
 
 
