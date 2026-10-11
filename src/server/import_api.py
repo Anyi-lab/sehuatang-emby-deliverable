@@ -2189,6 +2189,52 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
                     ttl = rr[0][:300]
             except Exception:
                 pass
+            # 2026-10-11 用户方向: 非番号/杂项(skip_mdc) 不再停在「待补元数据」等油猴 📤 ——
+            # 自动兜底: 一文件一目录(目录名=文件名, 站标前缀清掉) + 目录同名 nfo
+            # → 扫库 → _refresh_emby_path 缺主图放行 AllowFfProcess → Emby 抽帧自动出图。
+            # 有番号但 MDC 刮削失败/不完整(skip_mdc=False) 保持旧行为: 标「待补元数据」等 📤。
+            if skip_mdc:
+                fb_dirs, fb_info = [], 'skipped'
+                try:
+                    fb_dirs, fb_info = _fallback_emby_movie_dirs_per_file(thread_id, ttl, category)
+                except Exception as e:
+                    fb_info = 'exc:%s' % str(e)[:120]
+                    log.warning('[import] 非番号自动兜底异常 thread=%s: %s', thread_id, fb_info)
+                if fb_dirs:
+                    save_task(task_id, status='running', step='scan',
+                              msg='非番号自动兜底: %d 条(一文件一条目, 条目名=文件名) → 触发 Emby 扫库+抽帧 %s'
+                                  % (len(fb_dirs), fb_info),
+                              thread_id=thread_id, title=ttl)
+                    log.info('[import] 非番号自动兜底入库 %d 条 (thread=%s, %s)',
+                             len(fb_dirs), thread_id, fb_info)
+                    try:
+                        _trigger_emby_scan()
+                    except Exception as e:
+                        log.warning('[import] 兜底扫库触发失败: %s', str(e)[:120])
+                    time.sleep(8)                 # 等 Emby 扫到新建目录
+                    hit = 0
+                    for d in fb_dirs:
+                        for _try in range(3):
+                            try:
+                                n_hit = _refresh_emby_path(d, full=True)
+                            except Exception as _e:
+                                n_hit = 0
+                                log.warning('[import] 兜底定向刷新异常 %s: %s', d, str(_e)[:100])
+                            if n_hit:
+                                hit += n_hit
+                                break
+                            time.sleep(4)
+                    save_task(task_id, status='done', step='scan',
+                              msg='非番号自动入库完成: %d 条(条目名=文件名) 定向刷新 %d 条 → 缺图的由 Emby 抽帧自动补图'
+                                  % (len(fb_dirs), hit),
+                              thread_id=thread_id, title=ttl)
+                    try:
+                        _start_prewarm(_local_strm_dir(savepath, category), task_id, ttl)
+                    except Exception as _e:
+                        log.warning('[prewarm] 启动失败: %s', str(_e)[:120])
+                    return
+                log.info('[import] thread=%s 非番号兜底未建目录(%s), 退回待补元数据 (task=%s)',
+                         thread_id, fb_info, task_id)
             save_task(task_id, status='done', step='nfo',
                       msg=f'MDC 未刮削或元数据不完整: 请在帖子页用油猴脚本补充元数据 (thread #{thread_id}), 补充后自动触发 Emby 刷新+预热',
                       thread_id=thread_id, title=ttl)
@@ -6343,6 +6389,27 @@ _EA_NAME_RE = re.compile(r'(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9]{1,20})[.\-_](\d{
 _EA_DATEONLY_RE = re.compile(r'^(\d{2})[.\-_](\d{2})[.\-_](\d{2})(?![\d])')
 
 
+# ---- 2026-10-11 用户方向: 非番号一帖多文件 → 一文件一条目, 条目名 = 文件名 ----
+# 文件名常带发帖站的站标前缀 (WWW.98T.LA@ / twojav.com@ / hkbisi.com@ / kcf9.com@ ...),
+# 清掉再当条目名, 否则 Emby 里一屏全是 "WWW.98T.LA@..."。
+_STEM_SITE_PREFIX_RE = re.compile(r'^(?:[A-Za-z0-9][A-Za-z0-9\-]{0,30}\.)+[A-Za-z]{2,10}@')
+_STEM_VIDEO_EXT_RE = re.compile(r'\.(strm|mp4|mkv|avi|wmv|mov|ts|m2ts|rmvb|flv|m4v|webm)$', re.I)
+
+
+def _clean_entry_stem(stem):
+    """strm 文件名主干 → 能当 Emby 条目名的干净名字 (清站标前缀 + 首尾杂质)。
+    WWW.98T.LA@nidekikibabe-2026-1 -> nidekikibabe-2026-1
+    twojav.com@13dsvr01939_1_8k   -> 13dsvr01939_1_8k"""
+    s = str(stem or '')
+    s = _STEM_VIDEO_EXT_RE.sub('', s)
+    prev = None
+    while prev != s:                      # 可能叠了两层前缀
+        prev = s
+        s = _STEM_SITE_PREFIX_RE.sub('', s, count=1)
+    s = s.strip(' "\'\t')
+    return re.sub(r'[\\/:*?"<>|]+', '_', s).strip() or ('entry_%d' % int(time.time()))
+
+
 def _fallback_entry_name(stem, title=''):
     """兜底目录名 —— 与 MDC 命名模板 `{{number}}` 对齐, 依次尝试:
     ① 番号 (JAV 类, _fanhao_from_names)  ② 片商.YY.MM.DD (欧美, 文件名优先/title 兜底)
@@ -6436,6 +6503,91 @@ def _fallback_emby_movie_dir(thread_id, title='', category=None):
                 '(hardlink=%d copy=%d existing=%d)', thread_id, cat, target, linked, copied, present)
     return target, 'fallback-created(hardlink=%d,copy=%d%s)' % (
         linked, copied, ',existing=%d' % present if present else '')
+
+
+def _fallback_emby_movie_dirs_per_file(thread_id, title='', category=None):
+    """非番号自动兜底 (2026-10-11 用户方向: 一帖多文件 → 一文件一条目)。
+
+    - 目录名 = 文件名 (清掉站标前缀, 如 WWW.98T.LA@nidekikibabe-2026-1 → nidekikibabe-2026-1)
+    - 每条目目录里写【目录同名 nfo】(title = 文件名) → Emby 条目名就是文件名
+      (依据 _ensure_dir_nfo 的实测根因: 没有目录同名 nfo 时 Emby 不把目录当电影单元、
+      不分配 poster.jpg —— 2026-08-19 SNOS-332 复现)
+    - 不写图片: 由调用方的 _refresh_emby_path「缺主图放行 AllowFfProcess」让 Emby
+      Image Capture 抽帧自动出图 (2026-10-11 已实测 8s 内出图)。
+    落点固定「杂项」库 (与 _fallback_emby_movie_dir 一致); 国产(cn) 仍不入库。
+    返回 (dirs, info): dirs = 每个文件的条目目录列表; info = 日志说明
+    """
+    cat = _category_from_any(category) or _thread_category(thread_id)
+    if cat == 'cn':
+        return [], 'cn-excluded(国产不入库)'
+    target_root = MANUAL_ROOT
+    if not os.path.isdir(target_root):
+        return [], 'no-manual-root:%s' % target_root
+    local_dir = _local_strm_dir('/sehuatang/%s/thread_%s' % (category_name(cat), thread_id), cat)
+    strms = []
+    if os.path.isdir(local_dir):
+        for dp, dns, fns in os.walk(local_dir):
+            if dp != local_dir and dp[len(local_dir):].count(os.sep) > 4:
+                dns[:] = []
+                continue
+            for fn in fns:
+                if fn.lower().endswith('.strm'):
+                    strms.append(os.path.join(dp, fn))
+    if not strms:
+        return [], 'no-local-strm:%s' % local_dir
+
+    dirs, linked, present, bad = [], 0, 0, 0
+    for fp in sorted(strms):
+        stem = _clean_entry_stem(os.path.splitext(os.path.basename(fp))[0])
+        target = os.path.join(target_root, stem)
+        try:
+            os.makedirs(target, exist_ok=True)
+        except Exception as e:
+            bad += 1
+            log.warning('[metadata] 兜底建目录失败 %s: %s', target, str(e)[:80])
+            continue
+        dst = os.path.join(target, stem + '.strm')
+        need_link = True
+        if os.path.exists(dst):
+            try:
+                same = (os.stat(dst).st_ino == os.stat(fp).st_ino
+                        or os.stat(dst).st_size == os.stat(fp).st_size)
+            except OSError:
+                same = False
+            if same:
+                present += 1
+                need_link = False
+            else:
+                try:
+                    os.remove(dst)         # 同名不同内容 → 换成当前的
+                except OSError:
+                    pass
+        if need_link:
+            try:
+                os.link(fp, dst)
+                linked += 1
+            except OSError:
+                try:
+                    shutil.copyfile(fp, dst)
+                    linked += 1
+                except Exception as e:
+                    bad += 1
+                    log.warning('[metadata] 兜底链 strm 失败 %s: %s', fp, str(e)[:80])
+                    continue
+        # 目录同名 nfo (title = 文件名): Emby 认目录为电影单元 + 条目名 = 文件名
+        dir_nfo = os.path.join(target, stem + '.nfo')
+        if not os.path.exists(dir_nfo):
+            try:
+                with open(dir_nfo, 'w', encoding='utf-8') as f:
+                    f.write(_movie_nfo_xml(stem, '', thread_id))
+            except Exception as e:
+                log.warning('[metadata] 写兜底 nfo 失败 %s: %s', dir_nfo, str(e)[:80])
+        dirs.append(target)
+
+    info = 'per-file(link=%d,existing=%d,bad=%d)' % (linked, present, bad)
+    log.warning('[metadata] 非番号自动兜底(一文件一目录): thread=%s -> 杂项 %d 条 %s',
+                thread_id, len(dirs), info)
+    return dirs, info
 
 
 def _split_multi(v):

@@ -42,6 +42,7 @@ sehuatang-emby-deliverable/
 │   ├── 02-系统架构.md               # 架构图、组件清单、数据流、端口
 │   ├── 03-使用方法.md               # 油猴脚本安装/使用、API 说明、任务监控
 │   ├── 04-部署指南.md               # 服务器端组件部署、配置项说明
+│   ├── 05~13-*.md                   # 各阶段专题记录（分类/海报裁剪/插件抽帧/元数据兜底等）
 │   └── media-server-adapter.md      # 媒体服务器通用适配方案（Emby/Jellyfin，含扩展指引）
 ├── src/
 │   ├── userscript/
