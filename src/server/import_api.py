@@ -359,6 +359,11 @@ CATEGORY_MAP = {
     # 只到 strm 落地, 之后由 📤 手动补元数据 (服务端兜底建目录, 见 _fallback_emby_movie_dir)。
     # 它同时是「MDC 刮不到」时的兜底落点 —— 手动刮的片子一律进这里, 一处可查。
     'misc': ('/mnt/g/srtm/待看/sehuatang_misc',  MANUAL_ROOT,                  '杂项'),
+    # 2026-10-16 用户需求: 「自存」—— 色花堂帖子里想直接存进 已刮削/自存 库的片子。
+    # 复用已有链路, 零新增基础设施: MDC 早已 watch 待看/自存 (target /media/已刮削/自存),
+    # Emby 库「自存」(16878 -> G:\srtm\已刮削\自存) 早已存在, 只缺一个分类 key 让入库时能选。
+    # 115 落点 /sehuatang/自存/thread_x; 本地 strm 落 待看/自存/thread_x (非 av 专用根, 剥掉分类层)。
+    'self': ('/mnt/g/srtm/待看/自存',            '/mnt/g/srtm/已刮削/自存',     '自存'),
 }
 DEFAULT_CATEGORY = 'av'
 # 分类 key -> 合法值 (api 校验 / 恢复路径使用)
@@ -1663,7 +1668,7 @@ def _poster_wide_fix(dirpath):
 
 # ==================== 海报体检页 (/posters) 的 Emby 侧适配 (2026-09-28) ====================
 # 页面本体在 poster_page.py（不 import 本模块，避免循环）；token/host/前缀探测这些脏活留在这。
-POSTER_EMBY_LIBS = (('13731', '欧美'), ('22552', '无码'))   # Emby 库 id -> 库名
+POSTER_EMBY_LIBS = (('13731', '欧美'), ('22552', '无码'), ('16878', '自存'))   # Emby 库 id -> 库名
 
 
 def _poster_emby_lib_items(lib_id, limit=2000):
