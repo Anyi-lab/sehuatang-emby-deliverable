@@ -420,8 +420,12 @@ SCRAPE_TMP_DIR = os.path.join(BASE, 'tmp_scrape')   # scrape 直写缓存目录 
 IMPORT_ROOT = '/sehuatang'
 IMPORT_TV_ROOT = '/sehuatang_tv'   # 剧集媒体库目录(115): 超多视频的 thread 整个移动到此处
 MEDIA_EXTS = {'.mp4', '.mkv', '.mov', '.avi', '.flv', '.m4v', '.ts', '.wmv', '.rmvb', '.rm', '.webm'}
-# 用户规则(2026-08-07): 只保留 >500MB 的视频, 其余文件(广告/小视频/rar/html等)全部删除
-KEEP_VIDEO_MIN = 500 * 1024 * 1024
+# 用户规则(2026-08-07): 只保留 >N MB 的视频, 其余文件(广告/小视频/rar/html等)全部删除
+# 2026-10-18: 500MB → 200MB (可用 KEEP_VIDEO_MIN_MB 覆盖)。
+#   500MB 把 300-490MB 的正片误杀成广告: ①adopt 阶段判「还没下完」白等 2h 后 failed
+#   (CUS-1672 488MB / DigitalPlayground 342MB 实测); ②清理阶段更会把正片直接删掉。
+#   实测广告小视频 10-20MB, 200MB 足以区分; 另外 clean_keep_large_videos 加了「最大视频必留」保底。
+KEEP_VIDEO_MIN = int(float(os.environ.get('KEEP_VIDEO_MIN_MB', '200')) * 1024 * 1024)
 
 # ============================== 115 操作 (CD2: 挂载文件系统 + gRPC 离线推送) ==============================
 class Push115:
@@ -707,12 +711,17 @@ class Push115:
         except Exception as e:
             log.warning('clean walk %s 失败: %s', savepath, str(e)[:120])
             return [], []
+        # 2026-10-18 保底: 无论体积, 最大的那个视频一定是正片, 绝不删。
+        # 之前纯靠 >=keep_min 判定, 一部 150MB 的短片会被当广告整批删光。
+        _vids = [(rel, name, size) for rel, name, is_dir, size in items
+                 if not is_dir and size and os.path.splitext(name.lower())[1] in MEDIA_EXTS]
+        biggest = max(_vids, key=lambda x: x[2], default=None)
         for rel, name, is_dir, size in items:
             if is_dir:
                 continue
             full = f'{savepath}/{rel}' if rel else f'{savepath}/{name}'
             stem, ext = os.path.splitext(name.lower())
-            if ext in MEDIA_EXTS and size and size >= keep_min:
+            if ext in MEDIA_EXTS and size and (size >= keep_min or (biggest and rel == biggest[0] and name == biggest[1])):
                 kept.append((rel, size))
                 continue
             if ext in meta_exts:
@@ -2023,7 +2032,7 @@ def _run_import_post(task_id, thread_id=None, magnet=None, title=None, thread_ur
                 kept, removed = p.clean_keep_large_videos(savepath)
                 log.info('[import] 清理完成: 保留 %d 个大视频, 删除 %d 个其他文件', len(kept), len(removed))
                 save_task(task_id, status='running', step='wait',
-                          msg=f'清理完成: 保留 {len(kept)} 个>500MB视频, 删除 {len(removed)} 个广告/小文件',
+                          msg=f'清理完成: 保留 {len(kept)} 个>{KEEP_VIDEO_MIN // 1024 // 1024}MB视频(含最大视频保底), 删除 {len(removed)} 个广告/小文件',
                           thread_id=str(thread_id or ''), title=(title or '')[:300])
             except Exception as e:
                 log.warning('清理 115 目录失败: %s', e)
@@ -2696,16 +2705,21 @@ def _adopt_wait_ready(p, task_id, dir_115, number, info_hash='', timeout=None):
             log.warning('[adopt] 列目录失败: %s', str(e)[:100])
             vids, total, big = [], None, []
         rounds += 1
-        if not done and big and rounds > 1 and last_total is not None and total == last_total:
+        # 2026-10-18: 兜底放行 —— 有视频且目录总量两轮不变即视为下完,
+        #   不再要求单文件必须 >= KEEP_VIDEO_MIN (短片/欧美 480p 常只有 300-500MB, 以前必失败)
+        stable = (rounds > 1 and last_total is not None and total == last_total
+                  and (total or 0) >= 150 * 1024 * 1024)
+        if not done and stable:
             done, why = True, '目录大小两轮不变'
         last_total = total
-        if done and big:
+        if done and (big or stable):
             save_task(task_id, status='running', step='adopt_wait',
                       msg=f'avdb 下载已完成({why}), 视频 {len(vids)} 个, 开始入库',
                       thread_id=str(number or ''), title=str(number or ''))
             return True
-        if done and not big:
-            log.warning('[adopt] %s 判定完成但未见 >=500MB 视频, 再等一轮', number)
+        if done and not (big or stable):
+            log.warning('[adopt] %s 判定完成但未见 >=%dMB 视频(仅 %d 个 / %.1fMB), 再等一轮',
+                        number, KEEP_VIDEO_MIN // 1024 // 1024, len(vids), (total or 0) / 1024 / 1024)
             done = False
         save_task(task_id, status='running', step='adopt_wait',
                   msg=f'{number} 等待 avdb 下载完成({why or "下载中"}), 已等 {int(el / 60)} 分钟, '
