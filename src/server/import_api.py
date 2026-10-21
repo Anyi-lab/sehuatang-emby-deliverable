@@ -354,6 +354,12 @@ CATEGORY_MAP = {
     'cn':   ('/mnt/g/srtm/待看/sehuatang_cn',    '/mnt/g/srtm/_trash_国产',     '国产自拍'),
     'ea':   ('/mnt/g/srtm/待看/sehuatang_ea',    '/mnt/g/srtm/已刮削/欧美',     '欧美'),
     'lf':   ('/mnt/g/srtm/待看/sehuatang_lf',    '/mnt/g/srtm/已刮削/里番',     '里番'),
+    # 2026-10-21 用户需求: 「无码」独立分类 —— 库里混着有码/无码不好找, 想把无码单独放一个库。
+    # 无需新增任何基础设施: Emby 库「无码」(22552 -> G:\srtm\已刮削\无码) 早已存在,
+    # 目录结构就是 MDC naming.folder 产出的 `{mosaic}{首字母} 系列/{番号}`(无码H 系列/无码M 系列…);
+    # POSTER_EMBY_LIBS 里也早就有 22552。只缺一个入库 key: 115 落点 /sehuatang/无码/thread_x,
+    # 本地 strm 落 待看/sehuatang_uc/thread_x, MDC 刮削输出 已刮削/无码 (+watch 目录 sehuatang_uc)。
+    'uc':   ('/mnt/g/srtm/待看/sehuatang_uc',    '/mnt/g/srtm/已刮削/无码',     '无码'),
     # 2026-10-09 用户需求: 「杂项」—— 杂七杂八、站点上没有元数据、只能靠帖子页手动补的片子
     # 单独一库, 不混进 欧美/AV。MDC 不 watch 这个分类 (MDC watch_dirs 里没有它), 所以流水线
     # 只到 strm 落地, 之后由 📤 手动补元数据 (服务端兜底建目录, 见 _fallback_emby_movie_dir)。
