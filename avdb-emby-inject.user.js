@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AVdb → Emby 一键入库 (色花堂点单版)
 // @namespace    sehuatang.emby.deliverable
-// @version      0.3.4
+// @version      0.3.5
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
 // @description  在 AVdb 文章卡片 + 在线资源(online-resources ranking/top/latest)卡片 + 磁力详情页(online-resources?movie=)上注入"→ Emby 入库"按钮。文章卡片直接取缓存 magnet; 在线资源卡片按番号反查本地库(优先)或拉取 JavDB 磁力; 磁力详情页对资源库磁力(色花堂)、在线磁链(javdb magnets)与评论区资源(javdb comment-resources, 含磁力/ED2K)逐条注入, 每条一键入库。再推给 import_api (localhost:5081) 全包入库; 入库时从下拉选落地分类(AV/FC2/丝袜/国产自拍/欧美/里番, 可选自定义)。
@@ -174,19 +174,183 @@
     return 'http://localhost:5081';
   }
 
-  // 卡片内找番号文本 (在线资源卡片没有本地 tid, 从 DOM 文本提取番号)
-  // 先试整串匹配 (纯番号 span), 失败再从卡片全文搜番号模式 (可能与其他文字同行)
-  function numberFromCard(card) {
-    const full = /^\s*([a-z0-9]{1,12}-\d{2,8})\s*$/i;
-    const els = card.querySelectorAll('span, div, p, a');
-    for (const el of els) {
-      const t = (el.textContent || '').trim();
-      if (t && t.length <= 20 && full.test(t)) return t;
+  // ---------- 卡片标识提取 ----------
+  // 文章卡片结构 (avdb ≥2026-10): 封面 frame + 信息区
+  //   信息区首行 = [网站胶囊 "LTX"] [番号 "MNGS-089"] [其它徽章] ...
+  // 陷阱: 该行是同一个 <div class="flex flex-wrap items-center gap-2">,
+  //   div.textContent 会把相邻子元素直接粘起来 -> "LTXMNGS-089",
+  //   旧版按元素取 textContent 且 document order 先命中父节点, 于是拿错番号.
+  // 修法: 只认"文本节点"级别的最小单元, 再按需挑一个.
+  const NUMBER_RE = /^([A-Za-z0-9]{1,12})-(\d{2,8})$/;
+
+  function collectNumbers(card) {
+    const list = [];          // [{ n, tier }]  tier 越小越可信
+    const push = (raw, tier) => {
+      const t = String(raw || '').trim();
+      if (!t || t.length > 24) return;
+      if (!NUMBER_RE.test(t)) return;
+      const i = list.findIndex((x) => x.n === t);
+      if (i === -1) list.push({ n: t, tier });
+      else if (tier < list[i].tier) list[i].tier = tier;
+    };
+    // tier 1: 文本节点 —— 不会被相邻胶囊/徽章粘成一串
+    try {
+      const walker = document.createTreeWalker(card, NodeFilter.SHOW_TEXT, null);
+      let n;
+      while ((n = walker.nextNode())) push(n.nodeValue, 1);
+    } catch (e) { /* ignore */ }
+    // tier 2: 叶子元素兜底 (文本被拆散 / 有伪元素时)
+    card.querySelectorAll('span, div, p, a, b, strong, em').forEach((el) => {
+      if (el.children && el.children.length) return;   // 跳过父容器, 避免拼接
+      push(el.textContent, 2);
+    });
+    // tier 3: 全文兜底 (最不可信, 容易吃到 "LTXMNGS-089" / "MNGS-0893516")
+    const loose = /\b([A-Za-z0-9]{1,12}-\d{2,8})\b/g;
+    const text = String(card.textContent || '');
+    let m;
+    while ((m = loose.exec(text))) push(m[1], 3);
+    return list;
+  }
+
+  // 一个番号的多种写法: 原样 + 逐个剥掉前导站点字母
+  // "LTXMNGS-089" -> LTXMNGS-089 / TXMNGS-089 / XMNGS-089 / MNGS-089
+  // 剩余字母 < 3 就停: "TPPS-022" 不会退化成 "PS-022" (那是另一部片), 防误推
+  function numberVariants(num) {
+    const k = String(num || '').trim().toUpperCase();
+    const out = [];
+    if (!k) return out;
+    out.push(k);
+    const m = k.match(NUMBER_RE);
+    if (m) {
+      const head = m[1];
+      const maxStrip = Math.min(4, head.length - 3);
+      for (let i = 1; i <= maxStrip; i++) out.push(head.slice(i) + '-' + m[2]);
     }
-    // 兜底: 全文搜索 "番号-数字" 模式 (取第一个, 排除过短/过长)
-    const loose = /\b([a-z0-9]{1,12}-\d{2,8})\b/i;
-    const m = (card.textContent || '').match(loose);
+    return out;
+  }
+
+  // 标题相似度: 用于给"剥前缀"匹配加一道防误推校验
+  function normText(s) {
+    return String(s || '').replace(/[\s\u3000….,。、（）()【】\[\]!?！？:：;；'"’”\-_/|~～·]+/g, '').toLowerCase();
+  }
+  function titleLooksSame(cardText, movieTitle) {
+    const a = normText(cardText);
+    const b = normText(movieTitle);
+    if (!a || !b) return false;
+    const n = 8;
+    if (b.length <= n) return a.includes(b);
+    for (let i = 0; i + n <= b.length; i += 2) {
+      if (a.includes(b.slice(i, i + n))) return true;
+    }
+    return false;
+  }
+
+  // 命中选择: 优先能与已缓存番号索引对上的; 否则取字母前缀最短的 (更接近真实番号)
+  function numberFromCard(card) {
+    const list = collectNumbers(card);
+    if (!list.length) return null;
+    // 1) 先找能和已缓存番号索引对上的 (tier 优先, 同 tier 里前缀短的优先)
+    const sorted = list.slice().sort((a, b) => {
+      if (a.tier !== b.tier) return a.tier - b.tier;
+      const pa = (a.n.match(NUMBER_RE) || [])[1] || '';
+      const pb = (b.n.match(NUMBER_RE) || [])[1] || '';
+      return pa.length - pb.length || a.n.length - b.n.length;
+    });
+    for (const c of sorted) {
+      for (const v of numberVariants(c.n)) {
+        if (numberIndex.has(v)) return v;
+      }
+    }
+    // 2) 索引没命中: 取最可信 + 前缀最短的那个
+    return sorted[0].n;
+  }
+
+  // 缓存反查 (含前缀裁剪兜底)
+  function findCachedByNumber(num) {
+    for (const v of numberVariants(num)) {
+      const hit = numberIndex.get(v);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  // 卡片里找本地文章 tid (封面图 URL: /api/v1/articles/{tid}/image)
+  function tidFromCard(card) {
+    const imgs = card.querySelectorAll('img');
+    for (const im of imgs) {
+      const cands = [im.currentSrc, im.getAttribute('src'), im.getAttribute('data-src'), im.getAttribute('srcset')];
+      for (const c of cands) {
+        const t = tidFromUrl(String(c || ''));
+        if (t) return t;
+      }
+    }
+    const m = String(card.innerHTML || '').match(/\/articles\/(\d+)\/(?:image|images|javdb-gallery)/);
     return m ? m[1] : null;
+  }
+
+  // 卡片里找 javdb movie_id (详情链接: javdb.com/v/{id} 或 ?movie={id})
+  function movieIdFromCard(card) {
+    const links = card.querySelectorAll('a[href]');
+    for (const a of links) {
+      const href = a.getAttribute('href') || '';
+      let m = href.match(/javdb\.com\/v\/([A-Za-z0-9]+)/);
+      if (m) return m[1];
+      try {
+        const u = new URL(href, location.origin);
+        const v = u.searchParams.get('movie');
+        if (v) return v;
+      } catch (e) { /* ignore */ }
+    }
+    return null;
+  }
+
+  // 服务端兜底: 番号 -> javdb movie (缓存里没有时的唯一可靠来源)
+  // cardText 传进来时, "剥前缀"命中的结果要做标题相似度校验, 防误推到另一部片
+  async function resolveMovieByNumber(num, cardText) {
+    const exact = String(num || '').trim().toUpperCase();
+    let fallback = null;
+    const numOf = (m) => String((m && m.number) || '').trim().toUpperCase();
+    const titleOk = (m) => !cardText || titleLooksSame(cardText, (m && (m.title || m.origin_title)) || '');
+    for (const q of numberVariants(num)) {
+      let movies = [];
+      try {
+        const res = await authFetch('/api/v1/javdb/search?type=movie&limit=10&q=' + encodeURIComponent(q));
+        const d = await res.json();
+        movies = (d && d.data && d.data.movies) || [];
+      } catch (e) { continue; }
+      if (!movies.length) continue;
+      // 1) 番号完全一致 (剥前缀命中时加标题校验, 防误推)
+      const eqHit = movies.find((m) => numOf(m) === q);
+      if (eqHit) {
+        if (q === exact || titleOk(eqHit)) return eqHit;
+        if (!fallback) fallback = eqHit;
+        continue;
+      }
+      // 2) 上游只返回唯一一部 -> 视为模糊命中
+      //    (站点把番号写歪一位很常见: FSDS-721 -> 上游 FSDSS-721)
+      if (movies.length === 1) {
+        if (titleOk(movies[0])) return movies[0];
+        if (!fallback) fallback = movies[0];
+      }
+    }
+    return fallback;
+  }
+
+  // 服务端兜底: movie_id -> javdb movie
+  async function resolveMovieById(movieId) {
+    try {
+      const res = await authFetch('/api/v1/javdb/movies/' + encodeURIComponent(movieId));
+      const d = await res.json();
+      const mv = (d && d.data && d.data.movie) || null;
+      if (mv) {
+        movieMap.set(String(mv.id), mv);
+        const k = String(mv.number || '').trim().toUpperCase();
+        if (k) numberIndex.set(k, { source: 'movie', movie_id: String(mv.id) });
+      }
+      return mv;
+    } catch (e) {
+      return null;
+    }
   }
 
   // ---------- 异步拉取 magnet ----------
@@ -197,9 +361,9 @@
     if (article && article.magnet) return { magnet: article.magnet, source: 'article' };
 
     const num = (movie && (movie.number || movie.code)) || (article && article.number) || '';
-    // 本地番号索引命中? (页面已加载过该番号的文章列表时)
+    // 本地番号索引命中? (页面已加载过该番号的文章列表时; 含站点前缀裁剪兜底)
     if (num) {
-      const hit = numberIndex.get(String(num).trim().toUpperCase());
+      const hit = findCachedByNumber(num);
       if (hit && hit.source === 'article') {
         const art = articleMap.get(hit.tid);
         if (art && art.magnet) return { magnet: art.magnet, source: 'article' };
@@ -213,9 +377,13 @@
         const res = await fetch('/api/v1/javdb/movies/' + encodeURIComponent(movie.id) + '/magnets', { credentials: 'include' });
         const d = await res.json();
         const magnets = (d && d.data && d.data.magnets) || (d && d.data && d.data.items) || [];
-        const m = magnets.find((x) => x && /^(magnet:)/.test(x.magnet_url || x.magnet || x.link || x.url || '')) ||
-                  magnets.find((x) => x && /^(magnet:|ed2k:)/.test(String(x.magnet_url || x.magnet || x.link || x.url || '')));
-        const mlink = m && (m.magnet_url || m.magnet || m.link || m.url);
+        const url = (x) => String((x && (x.magnet_url || x.magnet || x.link || x.url)) || '');
+        const isMag = (x) => /^(magnet:|ed2k:)/i.test(url(x));
+        // 优先: 文件名里带本番号的磁力 (避免取到同页其它版本的磁力)
+        const key = String(num || '').trim().toUpperCase();
+        const named = key ? magnets.find((x) => isMag(x) && String(x.name || '').toUpperCase().indexOf(key) >= 0) : null;
+        const m = named || magnets.find((x) => isMag(x) && /^magnet:/i.test(url(x))) || magnets.find(isMag);
+        const mlink = url(m);
         if (mlink) return { magnet: mlink, source: 'javdb' };
       } catch (e) { /* fallthrough */ }
     }
@@ -335,14 +503,10 @@
           const card = (frame.closest && frame.closest('[data-slot="card"]')) || frame;
           // 已注入跳过 (订阅徽章按钮 .resource-card-subscription-badge 是普通影片卡的常驻角标, 不是订阅容器)
           if (card.querySelector('.avdb-emby-btn')) return;
-          const img = card.querySelector('img[src*="/articles/"], img[data-src*="/articles/"]');
-          let tid = img ? tidFromUrl(img.currentSrc || img.src) : null;
-          let cardNumber = null;
-          if (!tid) {
-            // 在线资源卡片: 封面是 javdb 外链 (img-proxy), 无本地 tid, 从整卡 DOM 找番号文本
-            cardNumber = numberFromCard(card);
-          }
-          if (!tid && !cardNumber) return;
+          const tid = tidFromCard(card);
+          const cardMovieId = movieIdFromCard(card);
+          const cardNumber = tid ? null : numberFromCard(card);
+          if (!tid && !cardMovieId && !cardNumber) return;
 
           const btn = document.createElement('button');
           btn.className = 'avdb-emby-btn';
@@ -353,17 +517,33 @@
             if (btn.disabled) return;
 
             let article = tid ? articleMap.get(String(tid)) : null;
-            let movie = null;
-            if (!article && cardNumber) {
-              const hit = numberIndex.get(String(cardNumber).trim().toUpperCase());
+            let movie = cardMovieId ? movieMap.get(String(cardMovieId)) : null;
+            if (!article && !movie && cardNumber) {
+              const hit = findCachedByNumber(cardNumber);
               if (hit && hit.source === 'article') article = articleMap.get(hit.tid);
               if (hit && hit.source === 'movie') movie = movieMap.get(hit.movie_id);
+            }
+
+            // 缓存没命中就上服务端兜底 (movie_id -> 详情 / 番号 -> 搜索), 不再直接判"无数据"
+            if (!article && !movie && (cardMovieId || cardNumber)) {
+              btn.disabled = true;
+              btn.textContent = '查番号…';
+              btn.classList.add('avdb-emby-busy');
+              try {
+                if (cardMovieId) movie = await resolveMovieById(cardMovieId);
+                if (!movie && cardNumber) movie = await resolveMovieByNumber(cardNumber, card.textContent || '');
+              } catch (e) { /* ignore */ }
+              btn.disabled = false;
+              btn.classList.remove('avdb-emby-busy');
+              btn.textContent = '→ Emby';
             }
 
             if (!article && !movie) {
               btn.textContent = '无数据';
               btn.classList.add('avdb-emby-fail');
-              toast((tid ? '没有缓存到文章数据 (tid=' + tid + ')' : '没有缓存到在线资源数据 (番号 ' + cardNumber + ')') + ', 请刷新页面重试', 'err');
+              toast((tid ? '没有缓存到文章数据 (tid=' + tid + ')'
+                         : 'javdb 里查不到这个番号 (卡片解析为 ' + (cardNumber || '(空)') + ', 已试 ' + numberVariants(cardNumber).length + ' 种写法)')
+                    + ', 请刷新页面重试; 仍不行就是上游 javdb 没收录', 'err');
               setTimeout(() => { btn.textContent = '→ Emby'; btn.classList.remove('avdb-emby-fail'); }, 3000);
               return;
             }
@@ -718,5 +898,5 @@
     injectButtons(document);
     injectDetailButtons();
   }, 1200);
-  console.log('[AVdb-Emby] userscript v0.3.4 loaded. import_api=' + importApiBase());
+  console.log('[AVdb-Emby] userscript v0.3.5 loaded. import_api=' + importApiBase());
 })();
