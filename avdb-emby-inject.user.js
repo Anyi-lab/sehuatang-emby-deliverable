@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AVdb → Emby 一键入库 (色花堂点单版)
 // @namespace    sehuatang.emby.deliverable
-// @version      0.3.5
+// @version      0.3.6
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
 // @description  在 AVdb 文章卡片 + 在线资源(online-resources ranking/top/latest)卡片 + 磁力详情页(online-resources?movie=)上注入"→ Emby 入库"按钮。文章卡片直接取缓存 magnet; 在线资源卡片按番号反查本地库(优先)或拉取 JavDB 磁力; 磁力详情页对资源库磁力(色花堂)、在线磁链(javdb magnets)与评论区资源(javdb comment-resources, 含磁力/ED2K)逐条注入, 每条一键入库。再推给 import_api (localhost:5081) 全包入库; 入库时从下拉选落地分类(AV/FC2/丝袜/国产自拍/欧美/里番, 可选自定义)。
@@ -108,6 +108,14 @@
     .avdb-emby-btn.avdb-emby-ok { background:linear-gradient(135deg,#22c55e,#16a34a); }
     .avdb-emby-btn.avdb-emby-busy { background:linear-gradient(135deg,#f59e0b,#d97706); }
     .avdb-emby-btn.avdb-emby-fail { background:linear-gradient(135deg,#ef4444,#dc2626); }
+    /* 卡片内嵌版: 静态流内, 不覆盖封面, 不压 avdb 原生控件 */
+    .avdb-emby-btn.avdb-emby-inline {
+      position:static; margin-left:auto; padding:3px 8px; border-radius:6px;
+      font-size:11px; box-shadow:none; opacity:1; flex:0 0 auto;
+      align-self:center; white-space:nowrap; line-height:1.35;
+    }
+    .avdb-emby-btn.avdb-emby-inline:hover { transform:none; filter:brightness(1.1); }
+    .avdb-emby-btn.avdb-emby-tail { margin:6px 0 0; display:inline-flex; }
     .avdb-emby-toast {
       position:fixed; left:50%; bottom:36px; transform:translateX(-50%);
       z-index:99999; max-width:560px; padding:10px 16px; border-radius:10px;
@@ -490,6 +498,38 @@
     }
   }
 
+  // ---------- 按钮挂载位置 ----------
+  // 旧版把按钮 absolute 贴在封面右下角, 会压住 avdb/其它脚本 的原生控件。
+  // 现在优先塞进「徽章信息行」(番号/日期那行 flex), 靠右对齐, 完全在静态流里。
+  function badgeRowOf(card) {
+    const cands = [];
+    const divs = card.querySelectorAll('div');
+    for (const d of divs) {
+      const c = String(d.className || '');
+      if (!/(^|\s|\b)flex(\b|\s|$)/.test(c)) continue;
+      if (!/(^|\s)text-xs(\s|$)/.test(c)) continue;
+      if (d.querySelector('img') || d.querySelector('[data-image-frame]')) continue;
+      if (d.querySelector('.avdb-emby-btn')) continue;
+      const t = (d.textContent || '').trim();
+      if (!t || t.length > 80) continue;
+      cands.push(d);
+    }
+    // 取最深的那个 (子 div 最少) —— 那才是真正的徽章行, 不是外层包裹
+    cands.sort((a, b) => b.querySelectorAll('div').length - a.querySelectorAll('div').length);
+    return cands[0] || null;
+  }
+  function mountBtn(card, frame, btn) {
+    const row = badgeRowOf(card);
+    if (row) {
+      btn.classList.add('avdb-emby-inline');
+      row.appendChild(btn);
+      return;
+    }
+    // 兜底: 挂到卡片末尾, 静态流内 (不加 absolute, 不压封面)
+    btn.classList.add('avdb-emby-inline', 'avdb-emby-tail');
+    (card !== frame ? card : (frame.parentElement || frame)).appendChild(btn);
+  }
+
   // ---------- 注入按钮 ----------
   let injecting = false;
   function injectButtons(root) {
@@ -626,7 +666,7 @@
               }, 4000);
             }
           });
-          frame.appendChild(btn);
+          mountBtn(card, frame, btn);
         });
       } finally {
         injecting = false;
