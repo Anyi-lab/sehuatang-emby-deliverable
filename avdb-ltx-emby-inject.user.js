@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AVdb + Jasna-LTX → Emby 一键入库（二合一）
 // @namespace    yg.emby.deliverable
-// @version      1.4.0
+// @version      1.5.0
 // @updateURL    https://gh-proxy.com/https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @downloadURL  https://gh-proxy.com/https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @description  一份脚本管两个站：AVdb(localhost:8200) 卡片/磁力详情页注入「→ Emby」按钮；Jasna-LTX(ltxlib.dpdns.org) 右下角面板按番号一键入库。AVdb/LTX 单条走 /api/import(带 thread_id+title+thread_url 保住帖子上下文)，批量框走 /api/import/batch，共用 import_api(5081) 的「推115 → 落地 → 刮削 → strm → Emby」链路。不依赖任何站方脚本，不需要网页登录 115。
@@ -301,6 +301,7 @@
     .ltxe-btn.ghost:hover { background:#3d444d; }
     .ltxe-foot { display:flex; gap:6px; align-items:center; margin-top:8px; }
     .ltxe-empty { padding:14px; text-align:center; color:#6e7681; font-size:12px; }
+    .ltxe-stat { margin-top:6px; font-size:10px; color:#4b5563; line-height:1.4; word-break:break-all; }
     .ltxe-ta {
       width:100%; box-sizing:border-box; min-height:56px; resize:vertical; margin-top:8px;
       padding:6px 8px; border-radius:6px; border:1px solid #30363d;
@@ -1050,7 +1051,7 @@
       injectDetailButtons();
     }, 1200);
 
-    console.log('[Emby] AVdb 模式已加载 v1.4.0, import_api=' + importApiBase());
+    console.log('[Emby] AVdb 模式已加载 v1.5.0, import_api=' + importApiBase());
   }
 
   // ============================================================
@@ -1124,7 +1125,11 @@
     const pageWin = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
     const pageJSON = pageWin.JSON;
     const CAP_KEY = '__ltxEmbyKap';
-    const HOOK_FLAG = '__ltxEmbyHookInstalled';
+    const HOOK_FLAG = '__ltxEmbyParseHook';
+    const RESP_FLAG = '__ltxEmbyRespHook';
+
+    // 诊断计数: 面板上直接显示, 免得每次都要开控制台
+    const capStat = { resp: 0, parse: 0, hits: 0, items: 0 };
 
     function looksLikeItems(v) {
       if (!v || typeof v !== 'object') return false;
@@ -1140,32 +1145,69 @@
       return false;
     }
 
-    // 跨 world 直接读对象在部分环境会拿不到属性, 统一留一条字符串回传通道
+    // 统一入口: 先尝试直接吃(同 world 可读), 不行再用字符串回传
+    function handlePayload(v) {
+      try {
+        if (!looksLikeItems(v)) return;
+        capStat.hits++;
+        let n = 0;
+        try { n = ingestResponse(v) || 0; } catch (e) { n = 0; }
+        if (!n) {
+          try { pageWin.postMessage({ [CAP_KEY]: pageJSON.stringify(v) }, '*'); } catch (e) { /* ignore */ }
+        } else {
+          capStat.items += n;
+        }
+        updateStat();
+      } catch (e) { /* 绝不打断页面 */ }
+    }
+
+    // 跨 world 直接读对象在部分环境会拿不到属性, 留一条字符串回传通道
     window.addEventListener('message', function (ev) {
       const d = ev.data;
       if (!d || typeof d !== 'object' || typeof d[CAP_KEY] !== 'string') return;
-      try { ingestResponse(JSON.parse(d[CAP_KEY])); } catch (e) { /* ignore */ }
+      try {
+        const n = ingestResponse(JSON.parse(d[CAP_KEY])) || 0;
+        if (n) { capStat.items += n; updateStat(); }
+      } catch (e) { /* ignore */ }
     });
 
+    // ---- 钩子 1: Response.prototype.json ----
+    // 站点 pc() 里是 `return e.json()`, 这是浏览器原生实现,
+    // 不会去调 JS 层的 JSON.parse —— 只挂 JSON.parse 会漏掉全部 /api/items 数据。
+    try {
+      const RP = pageWin.Response && pageWin.Response.prototype;
+      if (RP && typeof RP.json === 'function' && !RP[RESP_FLAG]) {
+        const origJson = RP.json;
+        RP.json = function () {
+          capStat.resp++;
+          let p;
+          try { p = origJson.call(this); } catch (e) { throw e; }
+          return p.then(function (v) {
+            handlePayload(v);
+            return v;
+          });
+        };
+        RP[RESP_FLAG] = true;
+        console.log('[Emby] Response.json 钩子已装入页面上下文');
+      } else if (RP && RP[RESP_FLAG]) {
+        console.log('[Emby] Response.json 钩子已存在');
+      }
+    } catch (e) {
+      console.warn('[Emby] Response.json 钩子安装失败:', e);
+    }
+
+    // ---- 钩子 2: JSON.parse (兜底, 覆盖 text() 后再 parse 的路径) ----
     try {
       if (!pageJSON || typeof pageJSON.parse !== 'function') {
-        console.warn('[Emby] 拿不到页面的 JSON 对象, 捕获不可用');
+        console.warn('[Emby] 拿不到页面的 JSON 对象');
       } else if (pageJSON[HOOK_FLAG]) {
-        console.log('[Emby] JSON.parse 钩子已在页面上下文中 (页面未重新加载?)');
+        console.log('[Emby] JSON.parse 钩子已存在');
       } else {
         const origParse = pageJSON.parse;
         pageJSON.parse = function (text, reviver) {
           const v = origParse.call(this, text, reviver);
-          try {
-            if (looksLikeItems(v)) {
-              let n = 0;
-              try { n = ingestResponse(v) || 0; } catch (e) { n = 0; }
-              if (!n) {
-                // 直接读对象没成功 -> 用页面的 JSON 序列化后回传沙箱再解析
-                pageWin.postMessage({ [CAP_KEY]: pageJSON.stringify(v) }, '*');
-              }
-            }
-          } catch (e) { /* 绝不打断页面 */ }
+          capStat.parse++;
+          handlePayload(v);
           return v;
         };
         pageJSON[HOOK_FLAG] = true;
@@ -1173,6 +1215,13 @@
       }
     } catch (e) {
       console.warn('[Emby] JSON.parse 钩子安装失败:', e);
+    }
+
+    function updateStat() {
+      const el = document.getElementById('ltxe-stat');
+      if (!el) return;
+      el.textContent = '钩子: json×' + capStat.resp + ' parse×' + capStat.parse +
+        ' 命中×' + capStat.hits + ' · 条目 ' + itemMap.size;
     }
 
     // ---------- 面板 ----------
@@ -1210,6 +1259,7 @@
             <input id="ltxe-filter" type="text" placeholder="过滤番号 / 标题 (回车 = 入库第一条)" />
           </div>
           <div class="ltxe-list" id="ltxe-list"></div>
+          <div class="ltxe-stat" id="ltxe-stat"></div>
           <div class="ltxe-foot">
             <button class="ltxe-btn ghost" id="ltxe-clear">清空已提交标记</button>
             <button class="ltxe-btn ghost" id="ltxe-pull">重载数据</button>
@@ -1266,10 +1316,14 @@
       });
 
       // 重载数据: 站点响应是加密的, 脚本没法自己再要一遍(裸调 /api/items 会 428)。
-      // 数据全靠 JSON.parse 钩子在页面自己解析时截获, 所以"重新抓一次"= 重新加载页面。
+      // 数据全靠钩子在页面自己解析时截获, 所以"重新抓一次"= 重新加载页面。
       panel.querySelector('#ltxe-pull').addEventListener('click', () => {
         toast('正在重新加载页面以重新捕获数据…', 'ok');
-        setTimeout(() => location.reload(), 300);
+        setTimeout(() => {
+          try { (pageWin.location || location).reload(); return; } catch (e) { /* 落到下面的兜底 */ }
+          try { location.href = location.href; } catch (e) { /* ignore */ }
+          try { pageWin.location.href = pageWin.location.href; } catch (e) { /* ignore */ }
+        }, 250);
       });
 
       batchBtn.addEventListener('click', doBatch);
@@ -1296,6 +1350,7 @@
       if (!listEl) return;
       const items = filteredItems();
       countEl.textContent = itemMap.size + ' 条';
+      updateStat();
       if (!items.length) {
         listEl.innerHTML = '<div class="ltxe-empty">' +
           (itemMap.size ? '没有匹配的条目' : '还没捕获到数据<br/>在站点里翻一下列表/搜索一次就自动进来了') +
@@ -1422,7 +1477,7 @@
     function boot() {
       if (document.getElementById('ltxe-panel')) return;
       buildPanel();
-      console.log('[Emby] LTX 模式已加载 v1.4.0, import_api=' + importApiBase());
+      console.log('[Emby] LTX 模式已加载 v1.5.0, import_api=' + importApiBase());
     }
 
     if (document.readyState === 'loading') {
