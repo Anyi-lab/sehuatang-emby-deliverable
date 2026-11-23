@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AVdb + Jasna-LTX → Emby 一键入库（二合一）
 // @namespace    yg.emby.deliverable
-// @version      1.5.0
+// @version      1.6.0
 // @updateURL    https://gh-proxy.com/https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @downloadURL  https://gh-proxy.com/https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @description  一份脚本管两个站：AVdb(localhost:8200) 卡片/磁力详情页注入「→ Emby」按钮；Jasna-LTX(ltxlib.dpdns.org) 右下角面板按番号一键入库。AVdb/LTX 单条走 /api/import(带 thread_id+title+thread_url 保住帖子上下文)，批量框走 /api/import/batch，共用 import_api(5081) 的「推115 → 落地 → 刮削 → strm → Emby」链路。不依赖任何站方脚本，不需要网页登录 115。
@@ -301,7 +301,7 @@
     .ltxe-btn.ghost:hover { background:#3d444d; }
     .ltxe-foot { display:flex; gap:6px; align-items:center; margin-top:8px; }
     .ltxe-empty { padding:14px; text-align:center; color:#6e7681; font-size:12px; }
-    .ltxe-stat { margin-top:6px; font-size:10px; color:#4b5563; line-height:1.4; word-break:break-all; }
+    .ltxe-stat { margin-top:6px; font-size:10px; color:#4b5563; line-height:1.4; word-break:break-all; white-space:pre-line; }
     .ltxe-ta {
       width:100%; box-sizing:border-box; min-height:56px; resize:vertical; margin-top:8px;
       padding:6px 8px; border-radius:6px; border:1px solid #30363d;
@@ -1051,7 +1051,7 @@
       injectDetailButtons();
     }, 1200);
 
-    console.log('[Emby] AVdb 模式已加载 v1.5.0, import_api=' + importApiBase());
+    console.log('[Emby] AVdb 模式已加载 v1.6.0, import_api=' + importApiBase());
   }
 
   // ============================================================
@@ -1071,19 +1071,40 @@
       return '';
     }
 
+    // 链接字段兼容: 站点快照是 links:["ed2k://..."] 字符串数组,
+    // 但实时接口可能给对象数组或单个 link/magnet 字段, 全都收
+    function toLinkArray(arr) {
+      const out = [];
+      if (!Array.isArray(arr)) return out;
+      for (const x of arr) {
+        if (typeof x === 'string') {
+          if (x) out.push(x);
+        } else if (x && typeof x === 'object') {
+          const u = x.url || x.magnet || x.magnet_url || x.link || x.href || x.src || x.uri;
+          if (typeof u === 'string' && u) out.push(u);
+        }
+      }
+      return out;
+    }
+
     function ingestItem(raw) {
       if (!raw || typeof raw !== 'object') return false;
-      const code = normCode(raw.code);
+      const code = normCode(raw.code || raw.number || raw.id);
       if (!code) return false;
-      const links = Array.isArray(raw.links) ? raw.links.filter((x) => typeof x === 'string') : [];
-      const pending = Array.isArray(raw.pending_links) ? raw.pending_links.filter((x) => typeof x === 'string') : [];
+
+      const links = toLinkArray(raw.links);
+      const pending = toLinkArray(raw.pending_links || raw.pendingLinks);
+      // 单值字段也收: 快照里有 link: "ed2k://..." 这种写法
+      for (const k of ['link', 'magnet', 'magnet_url', 'ed2k']) {
+        if (typeof raw[k] === 'string' && raw[k]) links.push(raw[k]);
+      }
       if (!links.length && !pending.length) return false;
 
       const prev = itemMap.get(code) || {};
       itemMap.set(code, {
         code,
         title: raw.title || prev.title || '',
-        titleZh: raw.title_zh || prev.titleZh || '',
+        titleZh: raw.title_zh || raw.titleZh || prev.titleZh || '',
         links,
         pendingLinks: pending,
         url: raw.url || prev.url || '',
@@ -1129,7 +1150,7 @@
     const RESP_FLAG = '__ltxEmbyRespHook';
 
     // 诊断计数: 面板上直接显示, 免得每次都要开控制台
-    const capStat = { resp: 0, parse: 0, hits: 0, items: 0 };
+    const capStat = { resp: 0, parse: 0, hits: 0, items: 0, fallback: 0, shape: '' };
 
     function looksLikeItems(v) {
       if (!v || typeof v !== 'object') return false;
@@ -1145,17 +1166,36 @@
       return false;
     }
 
-    // 统一入口: 先尝试直接吃(同 world 可读), 不行再用字符串回传
+    function firstItemOf(v) {
+      if (!v || typeof v !== 'object') return null;
+      if (Array.isArray(v)) return v[0] || null;
+      if (Array.isArray(v.items)) return v.items[0] || null;
+      if (v.data && Array.isArray(v.data.items)) return v.data.items[0] || null;
+      if (v.data && Array.isArray(v.data)) return v.data[0] || null;
+      return null;
+    }
+
+    // 统一入口: 先直接吃(同 world 通常可读);
+    // 只有"读对象时抛异常"才走字符串回传 —— 解析结果为 0 属于正常(没链接的条目),
+    // 绝不能触发回传, 否则 postMessage -> JSON.parse -> 再进来 会形成回环刷屏。
     function handlePayload(v) {
       try {
         if (!looksLikeItems(v)) return;
         capStat.hits++;
         let n = 0;
-        try { n = ingestResponse(v) || 0; } catch (e) { n = 0; }
-        if (!n) {
+        let threw = null;
+        try { n = ingestResponse(v) || 0; } catch (e) { threw = e; }
+
+        if (n) {
+          capStat.items += n;
+        } else if (threw && capStat.fallback < 3) {
+          capStat.fallback++;
           try { pageWin.postMessage({ [CAP_KEY]: pageJSON.stringify(v) }, '*'); } catch (e) { /* ignore */ }
         } else {
-          capStat.items += n;
+          const first = firstItemOf(v);
+          if (first) {
+            try { capStat.shape = Object.keys(first).join(','); } catch (e) { /* ignore */ }
+          }
         }
         updateStat();
       } catch (e) { /* 绝不打断页面 */ }
@@ -1220,8 +1260,10 @@
     function updateStat() {
       const el = document.getElementById('ltxe-stat');
       if (!el) return;
-      el.textContent = '钩子: json×' + capStat.resp + ' parse×' + capStat.parse +
+      let s = '钩子: json×' + capStat.resp + ' parse×' + capStat.parse +
         ' 命中×' + capStat.hits + ' · 条目 ' + itemMap.size;
+      if (!itemMap.size && capStat.shape) s += '\n首条字段: ' + capStat.shape;
+      el.textContent = s;
     }
 
     // ---------- 面板 ----------
@@ -1477,7 +1519,7 @@
     function boot() {
       if (document.getElementById('ltxe-panel')) return;
       buildPanel();
-      console.log('[Emby] LTX 模式已加载 v1.5.0, import_api=' + importApiBase());
+      console.log('[Emby] LTX 模式已加载 v1.6.0, import_api=' + importApiBase());
     }
 
     if (document.readyState === 'loading') {
