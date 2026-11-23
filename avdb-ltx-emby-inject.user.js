@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AVdb + Jasna-LTX → Emby 一键入库（二合一）
 // @namespace    yg.emby.deliverable
-// @version      1.3.1
+// @version      1.4.0
 // @updateURL    https://gh-proxy.com/https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @downloadURL  https://gh-proxy.com/https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @description  一份脚本管两个站：AVdb(localhost:8200) 卡片/磁力详情页注入「→ Emby」按钮；Jasna-LTX(ltxlib.dpdns.org) 右下角面板按番号一键入库。AVdb/LTX 单条走 /api/import(带 thread_id+title+thread_url 保住帖子上下文)，批量框走 /api/import/batch，共用 import_api(5081) 的「推115 → 落地 → 刮削 → strm → Emby」链路。不依赖任何站方脚本，不需要网页登录 115。
@@ -10,6 +10,7 @@
 // @match        http://127.0.0.1:8200/*
 // @match        http://192.168.2.238:8200/*
 // @match        https://ltxlib.dpdns.org/*
+// @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @connect      localhost
@@ -1049,7 +1050,7 @@
       injectDetailButtons();
     }, 1200);
 
-    console.log('[Emby] AVdb 模式已加载 v1.0.0, import_api=' + importApiBase());
+    console.log('[Emby] AVdb 模式已加载 v1.4.0, import_api=' + importApiBase());
   }
 
   // ============================================================
@@ -1110,13 +1111,20 @@
     }
 
     // ---------- 数据捕获 ----------
-    // 这个站把接口响应加密了: 响应头 application/vnd.ltx.encrypted+json,
-    // 请求还必须带 X-LTX-Session + 签名, 裸调 /api/items 直接 428。
-    // 在它自己的 Us() 里是这么解的:
+    // 站点的接口响应是加密的: 响应头 application/vnd.ltx.encrypted+json,
+    // 请求还要带 X-LTX-Session + 签名, 裸调 /api/items 直接 428。
+    // 它自己的 Us() 里这么解:
     //     let c = Ns.decode(s), l = JSON.parse(c);
-    // 也就是说密文最终一定会走 JSON.parse。在这一层截, 拿到的就是明文,
-    // 而且不需要复刻它那套 ECDH P-256 握手。
-    const origParse = JSON.parse;
+    // 明文一定过 JSON.parse, 所以在解析层截, 不用复刻它的 ECDH 握手。
+    //
+    // ⚠ 关键坑: 本脚本带 @grant, Tampermonkey 会把它放进隔离沙箱执行。
+    //   沙箱里的 JSON 不是页面的那个 JSON, 改 window.JSON.parse 对页面毫无影响
+    //   (v1.3.x 面板一条都抓不到就是因为这个)。必须改 unsafeWindow 上的 JSON。
+    //   注: XMLHttpRequest 这类 DOM 接口在沙箱里是透明的, 所以 AVdb 分支没事。
+    const pageWin = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+    const pageJSON = pageWin.JSON;
+    const CAP_KEY = '__ltxEmbyKap';
+    const HOOK_FLAG = '__ltxEmbyHookInstalled';
 
     function looksLikeItems(v) {
       if (!v || typeof v !== 'object') return false;
@@ -1132,11 +1140,40 @@
       return false;
     }
 
-    JSON.parse = function (text, reviver) {
-      const v = origParse.call(this, text, reviver);
-      try { if (looksLikeItems(v)) ingestResponse(v); } catch (e) { /* 绝不打断页面 */ }
-      return v;
-    };
+    // 跨 world 直接读对象在部分环境会拿不到属性, 统一留一条字符串回传通道
+    window.addEventListener('message', function (ev) {
+      const d = ev.data;
+      if (!d || typeof d !== 'object' || typeof d[CAP_KEY] !== 'string') return;
+      try { ingestResponse(JSON.parse(d[CAP_KEY])); } catch (e) { /* ignore */ }
+    });
+
+    try {
+      if (!pageJSON || typeof pageJSON.parse !== 'function') {
+        console.warn('[Emby] 拿不到页面的 JSON 对象, 捕获不可用');
+      } else if (pageJSON[HOOK_FLAG]) {
+        console.log('[Emby] JSON.parse 钩子已在页面上下文中 (页面未重新加载?)');
+      } else {
+        const origParse = pageJSON.parse;
+        pageJSON.parse = function (text, reviver) {
+          const v = origParse.call(this, text, reviver);
+          try {
+            if (looksLikeItems(v)) {
+              let n = 0;
+              try { n = ingestResponse(v) || 0; } catch (e) { n = 0; }
+              if (!n) {
+                // 直接读对象没成功 -> 用页面的 JSON 序列化后回传沙箱再解析
+                pageWin.postMessage({ [CAP_KEY]: pageJSON.stringify(v) }, '*');
+              }
+            }
+          } catch (e) { /* 绝不打断页面 */ }
+          return v;
+        };
+        pageJSON[HOOK_FLAG] = true;
+        console.log('[Emby] JSON.parse 钩子已装入页面上下文');
+      }
+    } catch (e) {
+      console.warn('[Emby] JSON.parse 钩子安装失败:', e);
+    }
 
     // ---------- 面板 ----------
     const PREFS_KEY = 'ltx-emby-prefs';
@@ -1385,7 +1422,7 @@
     function boot() {
       if (document.getElementById('ltxe-panel')) return;
       buildPanel();
-      console.log('[Emby] LTX 模式已加载 v1.0.0, import_api=' + importApiBase());
+      console.log('[Emby] LTX 模式已加载 v1.4.0, import_api=' + importApiBase());
     }
 
     if (document.readyState === 'loading') {
