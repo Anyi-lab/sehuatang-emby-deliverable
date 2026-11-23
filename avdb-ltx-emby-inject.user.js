@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AVdb + Jasna-LTX → Emby 一键入库（二合一）
 // @namespace    yg.emby.deliverable
-// @version      1.7.0
+// @version      1.7.1
 // @updateURL    https://gh-proxy.com/https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @downloadURL  https://gh-proxy.com/https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @description  一份脚本管两个站：AVdb(localhost:8200) 卡片/磁力详情页注入「→ Emby」按钮；Jasna-LTX(ltxlib.dpdns.org) 右下角面板按番号一键入库。AVdb/LTX 单条走 /api/import(带 thread_id+title+thread_url 保住帖子上下文)，批量框走 /api/import/batch，共用 import_api(5081) 的「推115 → 落地 → 刮削 → strm → Emby」链路。不依赖任何站方脚本，不需要网页登录 115。
@@ -1051,7 +1051,7 @@
       injectDetailButtons();
     }, 1200);
 
-    console.log('[Emby] AVdb 模式已加载 v1.7.0, import_api=' + importApiBase());
+    console.log('[Emby] AVdb 模式已加载 v1.7.1, import_api=' + importApiBase());
   }
 
   // ============================================================
@@ -1150,7 +1150,7 @@
     const RESP_FLAG = '__ltxEmbyRespHook';
 
     // 诊断计数: 面板上直接显示, 免得每次都要开控制台
-    const capStat = { resp: 0, parse: 0, hits: 0, items: 0, fallback: 0, shape: '', note: '' };
+    const capStat = { resp: 0, parse: 0, hits: 0, items: 0, fallback: 0, shape: '' };
 
     function looksLikeItems(v) {
       if (!v || typeof v !== 'object') return false;
@@ -1262,7 +1262,6 @@
       if (!el) return;
       let s = '钩子: json×' + capStat.resp + ' parse×' + capStat.parse +
         ' 命中×' + capStat.hits + ' · 条目 ' + itemMap.size;
-      if (capStat.note) s += '\n' + capStat.note;
       if (!itemMap.size && capStat.shape) s += '\n首条字段: ' + capStat.shape;
       el.textContent = s;
     }
@@ -1305,7 +1304,6 @@
           <div class="ltxe-stat" id="ltxe-stat"></div>
           <div class="ltxe-foot">
             <button class="ltxe-btn ghost" id="ltxe-clear">清空已提交标记</button>
-            <button class="ltxe-btn ghost" id="ltxe-harvest">抓全量</button>
             <button class="ltxe-btn ghost" id="ltxe-pull">重载数据</button>
             <button class="ltxe-btn ghost" id="ltxe-open" style="margin-left:auto">打开 5081</button>
           </div>
@@ -1359,9 +1357,6 @@
         window.open(importApiBase(), '_blank', 'noopener');
       });
 
-      panel.querySelector('#ltxe-harvest').addEventListener('click', (ev) => {
-        harvestAll(ev.currentTarget).catch((e) => toast('抓取出错: ' + e.message, 'err'));
-      });
 
       // 重载数据: 站点响应是加密的, 脚本没法自己再要一遍(裸调 /api/items 会 428)。
       // 数据全靠钩子在页面自己解析时截获, 所以"重新抓一次"= 重新加载页面。
@@ -1522,90 +1517,10 @@
       }
     }
 
-    // ---------- 抓全量: 自动翻页 ----------
-    // 站点是分页 + 无限滚动: 滚到底才请求下一页(/api/items/query, 每页 60 条),
-    // 加密会话在页面自己手里, 脚本没法直接要数据 —— 只能驱动页面去滚,
-    // 让页面自己请求, 我们再从钩子里收。
-    let harvesting = false;
-
-    function scrollTargets() {
-      const out = [];
-      const se = document.scrollingElement || document.documentElement;
-      if (se && se.scrollHeight > se.clientHeight + 50) out.push(se);
-      // 再找一个真正在滚的容器(虚拟列表常是内部 div)
-      let best = null, bestH = 0;
-      const all = document.querySelectorAll('div');
-      const n = Math.min(all.length, 1200);
-      for (let i = 0; i < n; i++) {
-        const el = all[i];
-        if (!el.clientHeight || el.clientHeight < 300) continue;
-        if (el.scrollHeight <= el.clientHeight + 50) continue;
-        let oy = '';
-        try { oy = getComputedStyle(el).overflowY; } catch (e) { continue; }
-        if (oy !== 'auto' && oy !== 'scroll') continue;
-        if (el.scrollHeight > bestH) { bestH = el.scrollHeight; best = el; }
-      }
-      if (best && out.indexOf(best) < 0) out.push(best);
-      return out;
-    }
-
-    function nudgeScroll(targets) {
-      const se = document.scrollingElement || document.documentElement;
-      for (const t of targets) {
-        try { t.scrollTop = t.scrollHeight; } catch (e) { /* ignore */ }
-        try { t.dispatchEvent(new Event('scroll', { bubbles: true })); } catch (e) { /* ignore */ }
-      }
-      try { window.scrollTo(0, se.scrollHeight); } catch (e) { /* ignore */ }
-    }
-
-    async function harvestAll(btn) {
-      if (harvesting) return;
-      harvesting = true;
-      const beforeY = window.scrollY || 0;
-      const startCount = itemMap.size;
-      const targets = scrollTargets();
-      const MAX_ROUNDS = 600;
-      let noGrowth = 0;
-      let round = 0;
-
-      if (btn) { btn.disabled = true; btn.textContent = '抓取中…'; }
-      toast('开始自动翻页抓取, 期间别动页面…', 'ok');
-
-      try {
-        for (; round < MAX_ROUNDS; round++) {
-          const prev = itemMap.size;
-          nudgeScroll(targets);
-          capStat.note = '抓取中: 第 ' + (round + 1) + ' 轮, 已 ' + itemMap.size + ' 条';
-          updateStat();
-          if (btn) btn.textContent = '抓取中 ' + itemMap.size;
-          await sleep(650);
-
-          if (itemMap.size > prev) {
-            noGrowth = 0;
-          } else {
-            noGrowth++;
-            // 连续几轮不涨: 可能到底了, 再补滚两次确认
-            if (noGrowth >= 5) break;
-            await sleep(400);
-          }
-        }
-      } finally {
-        harvesting = false;
-        capStat.note = '';
-        try { window.scrollTo(0, beforeY); } catch (e) { /* ignore */ }
-        if (btn) { btn.disabled = false; btn.textContent = '抓全量'; }
-        updateStat();
-      }
-
-      const added = itemMap.size - startCount;
-      toast('抓取结束: 跑了 ' + (round + 1) + ' 轮, 新增 ' + added + ' 条, 共 ' + itemMap.size + ' 条' +
-            (added ? '' : '\n没有新增 —— 可能已经到底, 或页面滚动容器没识别到'), added ? 'ok' : 'warn');
-    }
-
     function boot() {
       if (document.getElementById('ltxe-panel')) return;
       buildPanel();
-      console.log('[Emby] LTX 模式已加载 v1.7.0, import_api=' + importApiBase());
+      console.log('[Emby] LTX 模式已加载 v1.7.1, import_api=' + importApiBase());
     }
 
     if (document.readyState === 'loading') {
