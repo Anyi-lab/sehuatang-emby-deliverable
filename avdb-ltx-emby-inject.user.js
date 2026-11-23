@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AVdb + Jasna-LTX → Emby 一键入库（二合一）
 // @namespace    yg.emby.deliverable
-// @version      1.8.1
+// @version      1.8.2
 // @updateURL    https://gh-proxy.com/https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @downloadURL  https://gh-proxy.com/https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @description  一份脚本管两个站：AVdb(localhost:8200) 卡片/磁力详情页注入「→ Emby」按钮；Jasna-LTX(ltxlib.dpdns.org) 右下角面板按番号一键入库。AVdb/LTX 单条走 /api/import(带 thread_id+title+thread_url 保住帖子上下文)，批量框走 /api/import/batch，共用 import_api(5081) 的「推115 → 落地 → 刮削 → strm → Emby」链路。不依赖任何站方脚本，不需要网页登录 115。
@@ -1064,7 +1064,7 @@
       injectDetailButtons();
     }, 1200);
 
-    console.log('[Emby] AVdb 模式已加载 v1.8.1, import_api=' + importApiBase());
+    console.log('[Emby] AVdb 模式已加载 v1.8.2, import_api=' + importApiBase());
   }
 
   // ============================================================
@@ -1536,27 +1536,44 @@
     const CARD_BTN_CLS = 'ltxe-cardbtn';
     const handledEls = new WeakSet();
 
-    // 番号前缀必须以字母开头 —— 否则会把日期 "2019-03-07" 里的 "2019-03" 当成番号
-    const CARD_CODE_RE = /\b([A-Za-z][A-Za-z0-9]{1,11})-(\d{2,6})\b/g;
+    // 卡片文本里番号常被相邻元素粘成一串, 例如 "WANZ958WANZ-958"
+    // (徽章 WANZ-958 与其它文本挨着, textContent 直接拼起来)。
+    // 所以不硬切: 先取 "字母串-数字" 片段, 再从左边逐个剥字符,
+    // 拿剥出来的候选去 itemMap 里比对, 命中真实存在的那个才认。
+    function codesIn(text) {
+      const out = new Set();
+      const re = /([A-Za-z][A-Za-z0-9]{0,15})-(\d{2,6})/g;
+      let m;
+      while ((m = re.exec(text))) {
+        const head = m[1].toUpperCase();
+        const tail = m[2];
+        let hit = '';
+        for (let i = 0; i <= head.length - 2; i++) {
+          const cand = head.slice(i) + '-' + tail;
+          if (itemMap.has(cand)) { hit = cand; break; }
+        }
+        out.add(hit || (head.slice(-4) + '-' + tail));
+      }
+      return out;
+    }
 
-    // 从按钮往上找"卡片": 逐层看, 优先返回"已在 itemMap 里"的番号
+    // 从按钮往上找"卡片": 逐层扫描, 优先返回"已在 itemMap 里"的番号
     function codeFromEl(el) {
       let n = el;
       let fallback = '';
       for (let i = 0; i < 8 && n && n !== document.body; i++, n = n.parentElement) {
         const raw = String(n.textContent || '');
         if (raw.length > 4000) break;         // 再往上就是整个列表了
-        const m = raw.match(CARD_CODE_RE);
-        if (!m) continue;
-        const uniq = [...new Set(m.map((x) => x.toUpperCase()))];
-        const inMap = uniq.filter((c) => itemMap.has(c));
+        const codes = [...codesIn(raw)];
+        if (!codes.length) continue;
+        const inMap = codes.filter((c) => itemMap.has(c));
         if (inMap.length === 1) return inMap[0];      // 唯一命中, 最可信
         if (inMap.length > 1) {                        // 多个命中 = 已越过卡片
           if (!fallback) fallback = inMap[0];
           break;
         }
-        if (uniq.length === 1) {                       // 只有一个候选但还没捕获
-          if (!fallback) fallback = uniq[0];
+        if (codes.length === 1) {                      // 只有一个候选但还没捕获
+          if (!fallback) fallback = codes[0];
           continue;
         }
         break;                                          // 多个番号, 越过卡片边界
@@ -1615,7 +1632,7 @@
       if (document.getElementById('ltxe-panel')) return;
       buildPanel();
       injectCardButtons();
-      console.log('[Emby] LTX 模式已加载 v1.8.1, import_api=' + importApiBase());
+      console.log('[Emby] LTX 模式已加载 v1.8.2, import_api=' + importApiBase());
     }
 
     if (document.readyState === 'loading') {
