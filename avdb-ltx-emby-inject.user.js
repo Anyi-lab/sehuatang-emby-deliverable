@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AVdb + Jasna-LTX → Emby 一键入库（二合一）
 // @namespace    yg.emby.deliverable
-// @version      1.1.0
+// @version      1.2.0
 // @description  一份脚本管两个站：AVdb(localhost:8200) 卡片/磁力详情页注入「→ Emby」按钮；Jasna-LTX(ltxlib.dpdns.org) 右下角面板按番号一键入库。AVdb/LTX 单条走 /api/import(带 thread_id+title+thread_url 保住帖子上下文)，批量框走 /api/import/batch，共用 import_api(5081) 的「推115 → 落地 → 刮削 → strm → Emby」链路。不依赖任何站方脚本，不需要网页登录 115。
 // @author       YG
 // @match        http://localhost:8200/*
@@ -12,7 +12,7 @@
 // @grant        GM_addStyle
 // @connect      localhost
 // @connect      127.0.0.1
-// @connect      *
+// @connect      192.168.2.238
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -1025,10 +1025,21 @@
     }
 
     // ---------- 监听 ----------
-    const mo = new MutationObserver(() => {
-      injectButtons(document);
-      if (isMovieDetail()) injectDetailButtons();
-    });
+    // MutationObserver 在虚拟滚动/频繁重排下会疯狂触发, 每次都全量 querySelectorAll 很费。
+    // 合并成 200ms 一次的尾触发, 注入本身仍是幂等的(有 .avdb-emby-btn 就跳过)。
+    let injectTimer = null;
+    function scheduleInject() {
+      if (injectTimer) return;
+      injectTimer = setTimeout(() => {
+        injectTimer = null;
+        try { injectButtons(document); } catch (e) { /* ignore */ }
+        if (isMovieDetail()) {
+          injectDetailButtons().catch(() => {});
+        }
+      }, 200);
+    }
+
+    const mo = new MutationObserver(scheduleInject);
     mo.observe(document.body, { childList: true, subtree: true });
 
     setTimeout(() => {
@@ -1134,7 +1145,17 @@
     } catch (e) { /* ignore */ }
 
     // ---------- 面板 ----------
+    const PREFS_KEY = 'ltx-emby-prefs';
     const state = { filter: '', kind: 'fanhao', category: 'av' };
+    try {
+      const p = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
+      if (p.kind === 'fanhao' || p.kind === 'non_fanhao') state.kind = p.kind;
+      if (p.category && CATEGORIES.some((c) => c.key === p.category)) state.category = p.category;
+    } catch (e) { /* ignore */ }
+    function savePrefs() {
+      try { localStorage.setItem(PREFS_KEY, JSON.stringify({ kind: state.kind, category: state.category })); } catch (e) { /* ignore */ }
+    }
+
     let panel, listEl, countEl, filterEl, kindEl, catEl, taEl, batchBtn;
 
     function buildPanel() {
@@ -1160,6 +1181,7 @@
           <div class="ltxe-list" id="ltxe-list"></div>
           <div class="ltxe-foot">
             <button class="ltxe-btn ghost" id="ltxe-clear">清空已提交标记</button>
+            <button class="ltxe-btn ghost" id="ltxe-pull">拉全量</button>
             <button class="ltxe-btn ghost" id="ltxe-open" style="margin-left:auto">打开 5081</button>
           </div>
           <textarea class="ltxe-ta" id="ltxe-ta"
@@ -1181,6 +1203,7 @@
 
       catEl.innerHTML = categoryOptionsHtml(false);
       catEl.value = state.category;
+      kindEl.value = state.kind;
 
       panel.querySelector('#ltxe-head').addEventListener('click', () => {
         panel.classList.toggle('ltxe-collapsed');
@@ -1188,8 +1211,8 @@
           panel.classList.contains('ltxe-collapsed') ? '展开' : '收起';
       });
 
-      kindEl.addEventListener('change', () => { state.kind = kindEl.value; });
-      catEl.addEventListener('change', () => { state.category = catEl.value; });
+      kindEl.addEventListener('change', () => { state.kind = kindEl.value; savePrefs(); });
+      catEl.addEventListener('change', () => { state.category = catEl.value; savePrefs(); });
       filterEl.addEventListener('input', () => { state.filter = filterEl.value.trim().toUpperCase(); renderList(); });
       filterEl.addEventListener('keydown', (ev) => {
         if (ev.key !== 'Enter') return;
@@ -1209,6 +1232,30 @@
 
       panel.querySelector('#ltxe-open').addEventListener('click', () => {
         window.open(importApiBase(), '_blank', 'noopener');
+      });
+
+      // 拉全量: 直接用页面自身的 fetch(带 cookie / 人机校验态) 请求 /api/items。
+      // 站点有 Turnstile, 从脚本沙箱另发请求会 428; 走页面上下文才有会话。
+      panel.querySelector('#ltxe-pull').addEventListener('click', async (ev) => {
+        const b = ev.currentTarget;
+        const old = b.textContent;
+        b.disabled = true;
+        b.textContent = '拉取中…';
+        try {
+          const res = await window.fetch('/api/items', { credentials: 'include' });
+          let j = null;
+          try { j = await res.json(); } catch (e) { /* non-json */ }
+          const n = j ? ingestResponse(j) : 0;
+          if (n) toast('已拉取 ' + n + ' 条, 面板共 ' + itemMap.size + ' 条', 'ok');
+          else toast('接口没返回条目 (HTTP ' + res.status + ')' +
+            (res.status === 428 ? ': 需要先在页面里过一次人机校验' : ''),
+            res.status === 428 ? 'warn' : 'err');
+        } catch (e) {
+          toast('拉取失败: ' + e.message + '\n在站点里翻一次列表也能自动捕获', 'err');
+        } finally {
+          b.disabled = false;
+          b.textContent = old;
+        }
       });
 
       batchBtn.addEventListener('click', doBatch);
@@ -1293,10 +1340,11 @@
 
       try {
         // 带上帖子上下文: thread_id + title + thread_url, 否则落点退化成 manual_<hash8>
-        const javdbId = (String(item.url || '').match(/javdb\.com\/v\/([A-Za-z0-9]+)/) || [])[1] || '';
+        // thread_id 会变成 115 目录 thread_<id> (import_api.py:413) 并用于同帖去重(:1307),
+        // 所以这里用番号当身份 —— 比 javdb 短码可读, 且一部番号就是一个"帖"
         const { taskId, dup } = await submitOne({
           magnet: link,
-          thread_id: javdbId || item.code,
+          thread_id: item.code,
           title: item.title || item.titleZh || item.code,
           thread_url: item.url || '',
           kind: state.kind,
