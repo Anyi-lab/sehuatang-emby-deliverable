@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AVdb + Jasna-LTX → Emby 一键入库（二合一）
 // @namespace    yg.emby.deliverable
-// @version      1.2.1
+// @version      1.3.0
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @description  一份脚本管两个站：AVdb(localhost:8200) 卡片/磁力详情页注入「→ Emby」按钮；Jasna-LTX(ltxlib.dpdns.org) 右下角面板按番号一键入库。AVdb/LTX 单条走 /api/import(带 thread_id+title+thread_url 保住帖子上下文)，批量框走 /api/import/batch，共用 import_api(5081) 的「推115 → 落地 → 刮削 → strm → Emby」链路。不依赖任何站方脚本，不需要网页登录 115。
@@ -15,7 +15,7 @@
 // @connect      localhost
 // @connect      127.0.0.1
 // @connect      192.168.2.238
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 
 (function () {
@@ -1109,42 +1109,34 @@
       return n;
     }
 
-    const CAPTURE_RE = /\/api\/items(?:\/query|\/batch)?(?:[?#]|$)/;
+    // ---------- 数据捕获 ----------
+    // 这个站把接口响应加密了: 响应头 application/vnd.ltx.encrypted+json,
+    // 请求还必须带 X-LTX-Session + 签名, 裸调 /api/items 直接 428。
+    // 在它自己的 Us() 里是这么解的:
+    //     let c = Ns.decode(s), l = JSON.parse(c);
+    // 也就是说密文最终一定会走 JSON.parse。在这一层截, 拿到的就是明文,
+    // 而且不需要复刻它那套 ECDH P-256 握手。
+    const origParse = JSON.parse;
 
-    const origFetch = window.fetch;
-    if (typeof origFetch === 'function') {
-      window.fetch = function (...args) {
-        const p = origFetch.apply(this, args);
-        try {
-          const a0 = args[0];
-          const url = typeof a0 === 'string' ? a0 : (a0 && a0.url) || '';
-          if (CAPTURE_RE.test(url)) {
-            p.then((res) => {
-              try { res.clone().json().then(ingestResponse).catch(() => {}); } catch (e) { /* ignore */ }
-            }).catch(() => {});
-          }
-        } catch (e) { /* ignore */ }
-        return p;
-      };
+    function looksLikeItems(v) {
+      if (!v || typeof v !== 'object') return false;
+      if (Array.isArray(v)) {
+        return v.length > 0 && v[0] && typeof v[0] === 'object' && 'code' in v[0];
+      }
+      if (Array.isArray(v.items)) {
+        return v.items.length > 0 && v.items[0] && typeof v.items[0] === 'object' && 'code' in v.items[0];
+      }
+      if (v.data && Array.isArray(v.data.items)) {
+        return v.data.items.length > 0 && v.data.items[0] && typeof v.data.items[0] === 'object' && 'code' in v.data.items[0];
+      }
+      return false;
     }
 
-    try {
-      const oOpen = XMLHttpRequest.prototype.open;
-      const oSend = XMLHttpRequest.prototype.send;
-      XMLHttpRequest.prototype.open = function (m, u, ...rest) {
-        this.__u = String(u || '');
-        return oOpen.apply(this, [m, u, ...rest]);
-      };
-      XMLHttpRequest.prototype.send = function (...args) {
-        this.addEventListener('load', function () {
-          try {
-            if (!CAPTURE_RE.test(this.__u)) return;
-            ingestResponse(JSON.parse(this.responseText));
-          } catch (e) { /* ignore */ }
-        });
-        return oSend.apply(this, args);
-      };
-    } catch (e) { /* ignore */ }
+    JSON.parse = function (text, reviver) {
+      const v = origParse.call(this, text, reviver);
+      try { if (looksLikeItems(v)) ingestResponse(v); } catch (e) { /* 绝不打断页面 */ }
+      return v;
+    };
 
     // ---------- 面板 ----------
     const PREFS_KEY = 'ltx-emby-prefs';
@@ -1183,7 +1175,7 @@
           <div class="ltxe-list" id="ltxe-list"></div>
           <div class="ltxe-foot">
             <button class="ltxe-btn ghost" id="ltxe-clear">清空已提交标记</button>
-            <button class="ltxe-btn ghost" id="ltxe-pull">拉全量</button>
+            <button class="ltxe-btn ghost" id="ltxe-pull">重载数据</button>
             <button class="ltxe-btn ghost" id="ltxe-open" style="margin-left:auto">打开 5081</button>
           </div>
           <textarea class="ltxe-ta" id="ltxe-ta"
@@ -1236,28 +1228,11 @@
         window.open(importApiBase(), '_blank', 'noopener');
       });
 
-      // 拉全量: 直接用页面自身的 fetch(带 cookie / 人机校验态) 请求 /api/items。
-      // 站点有 Turnstile, 从脚本沙箱另发请求会 428; 走页面上下文才有会话。
-      panel.querySelector('#ltxe-pull').addEventListener('click', async (ev) => {
-        const b = ev.currentTarget;
-        const old = b.textContent;
-        b.disabled = true;
-        b.textContent = '拉取中…';
-        try {
-          const res = await window.fetch('/api/items', { credentials: 'include' });
-          let j = null;
-          try { j = await res.json(); } catch (e) { /* non-json */ }
-          const n = j ? ingestResponse(j) : 0;
-          if (n) toast('已拉取 ' + n + ' 条, 面板共 ' + itemMap.size + ' 条', 'ok');
-          else toast('接口没返回条目 (HTTP ' + res.status + ')' +
-            (res.status === 428 ? ': 需要先在页面里过一次人机校验' : ''),
-            res.status === 428 ? 'warn' : 'err');
-        } catch (e) {
-          toast('拉取失败: ' + e.message + '\n在站点里翻一次列表也能自动捕获', 'err');
-        } finally {
-          b.disabled = false;
-          b.textContent = old;
-        }
+      // 重载数据: 站点响应是加密的, 脚本没法自己再要一遍(裸调 /api/items 会 428)。
+      // 数据全靠 JSON.parse 钩子在页面自己解析时截获, 所以"重新抓一次"= 重新加载页面。
+      panel.querySelector('#ltxe-pull').addEventListener('click', () => {
+        toast('正在重新加载页面以重新捕获数据…', 'ok');
+        setTimeout(() => location.reload(), 300);
       });
 
       batchBtn.addEventListener('click', doBatch);
@@ -1425,8 +1400,16 @@
 
   // ============================================================
   //  分派
+  //  @run-at document-start: LTX 的 JSON.parse 钩子必须赶在站点首屏请求之前装上,
+  //  否则第一批数据(常常就是全量目录)会被漏掉。
+  //  AVdb 分支要 mo.observe(document.body), document-start 时 body 还不存在, 等 DOM 就绪。
   // ============================================================
-  if (IS_LTX) initLTX();
-  else initAVDB();
+  if (IS_LTX) {
+    initLTX();
+  } else if (document.body) {
+    initAVDB();
+  } else {
+    document.addEventListener('DOMContentLoaded', initAVDB, { once: true });
+  }
 
 })();
