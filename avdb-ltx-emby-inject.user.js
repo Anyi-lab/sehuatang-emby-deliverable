@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AVdb + Jasna-LTX → Emby 一键入库（二合一）
 // @namespace    yg.emby.deliverable
-// @version      1.8.2
+// @version      1.9.0
 // @updateURL    https://gh-proxy.com/https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @downloadURL  https://gh-proxy.com/https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @description  一份脚本管两个站：AVdb(localhost:8200) 卡片/磁力详情页注入「→ Emby」按钮；Jasna-LTX(ltxlib.dpdns.org) 右下角面板按番号一键入库。AVdb/LTX 单条走 /api/import(带 thread_id+title+thread_url 保住帖子上下文)，批量框走 /api/import/batch，共用 import_api(5081) 的「推115 → 落地 → 刮削 → strm → Emby」链路。不依赖任何站方脚本，不需要网页登录 115。
@@ -230,7 +230,7 @@
 
     /* ---------- AVdb 入库弹窗 ---------- */
     .avdb-emby-modal-overlay {
-      position:fixed; inset:0; z-index:99998; background:rgba(0,0,0,.55);
+      position:fixed; inset:0; z-index:2147483200; background:rgba(0,0,0,.55);
       display:flex; align-items:center; justify-content:center;
     }
     .avdb-emby-modal {
@@ -1064,7 +1064,7 @@
       injectDetailButtons();
     }, 1200);
 
-    console.log('[Emby] AVdb 模式已加载 v1.8.2, import_api=' + importApiBase());
+    console.log('[Emby] AVdb 模式已加载 v1.9.0, import_api=' + importApiBase());
   }
 
   // ============================================================
@@ -1456,10 +1456,78 @@
       }
     }
 
+    // ---------- 入库前确认弹窗 ----------
+    // 点一下就推 115 不可逆, 必须先确认; 顺便允许在弹窗里临时改类型/分类
+    function linkInfo(link) {
+      if (/^ed2k:\/\//i.test(link)) {
+        const p = String(link).split('|');
+        let name = p[2] || '';
+        try { name = decodeURIComponent(name); } catch (e) { /* ignore */ }
+        const size = Number(p[3]) || 0;
+        return { name, size };
+      }
+      const m = /[?&]dn=([^&]+)/i.exec(String(link));
+      let name = m ? m[1] : '';
+      if (name) { try { name = decodeURIComponent(name.replace(/\+/g, ' ')); } catch (e) { /* ignore */ } }
+      return { name, size: 0 };
+    }
+
+    function askConfirm(item, link) {
+      return new Promise((resolve) => {
+        const info = linkInfo(link);
+        const gb = info.size ? (info.size / 1073741824).toFixed(2) + ' GB' : '';
+        const overlay = document.createElement('div');
+        overlay.className = 'avdb-emby-modal-overlay';
+        overlay.innerHTML = `
+          <div class="avdb-emby-modal">
+            <h3>确认入库</h3>
+            <div class="sub"><b style="color:#fff;font-size:15px">${escapeHtml(item.code)}</b><br/>${escapeHtml(item.title || item.titleZh || '')}</div>
+            <div class="src">${escapeHtml(info.name || link)}${gb ? ' · ' + gb : ''}</div>
+            <label>类型</label>
+            <select id="ltxe-cf-kind">
+              <option value="fanhao">fanhao (影片/番号)</option>
+              <option value="non_fanhao">non_fanhao (剧集)</option>
+            </select>
+            <label>分类</label>
+            <select id="ltxe-cf-cat">${categoryOptionsHtml(false)}</select>
+            <div class="row">
+              <button class="cancel" id="ltxe-cf-cancel">取消</button>
+              <button class="go" id="ltxe-cf-go">开始入库</button>
+            </div>
+          </div>`;
+        document.body.appendChild(overlay);
+
+        const kEl = overlay.querySelector('#ltxe-cf-kind');
+        const cEl = overlay.querySelector('#ltxe-cf-cat');
+        kEl.value = state.kind;
+        cEl.value = state.category;
+
+        const close = (v) => { overlay.remove(); resolve(v); };
+        overlay.querySelector('#ltxe-cf-cancel').addEventListener('click', () => close(null));
+        overlay.querySelector('#ltxe-cf-go').addEventListener('click', () => close({
+          kind: kEl.value,
+          category: cEl.value,
+        }));
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) close(null); });
+        // Esc 取消
+        overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(null); });
+        setTimeout(() => { try { kEl.focus(); } catch (e) { /* ignore */ } }, 30);
+      });
+    }
+
     async function doImport(item, btn) {
       const link = pickLink(item);
       if (!link) { toast(item.code + ' 没有 ed2k/磁力链接', 'warn'); return; }
       const h = hashOf(item.code, link);
+
+      // 先确认再动手
+      const conf = await askConfirm(item, link);
+      if (!conf) return;
+      state.kind = conf.kind;
+      state.category = conf.category;
+      savePrefs();
+      if (kindEl) kindEl.value = state.kind;
+      if (catEl) catEl.value = state.category;
 
       if (btn) { btn.disabled = true; btn.classList.add('busy'); btn.textContent = '提交中…'; }
 
@@ -1632,7 +1700,7 @@
       if (document.getElementById('ltxe-panel')) return;
       buildPanel();
       injectCardButtons();
-      console.log('[Emby] LTX 模式已加载 v1.8.2, import_api=' + importApiBase());
+      console.log('[Emby] LTX 模式已加载 v1.9.0, import_api=' + importApiBase());
     }
 
     if (document.readyState === 'loading') {
