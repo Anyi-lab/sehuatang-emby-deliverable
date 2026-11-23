@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AVdb + Jasna-LTX → Emby 一键入库（二合一）
 // @namespace    yg.emby.deliverable
-// @version      1.7.1
+// @version      1.8.0
 // @updateURL    https://gh-proxy.com/https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @downloadURL  https://gh-proxy.com/https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @description  一份脚本管两个站：AVdb(localhost:8200) 卡片/磁力详情页注入「→ Emby」按钮；Jasna-LTX(ltxlib.dpdns.org) 右下角面板按番号一键入库。AVdb/LTX 单条走 /api/import(带 thread_id+title+thread_url 保住帖子上下文)，批量框走 /api/import/batch，共用 import_api(5081) 的「推115 → 落地 → 刮削 → strm → Emby」链路。不依赖任何站方脚本，不需要网页登录 115。
@@ -302,6 +302,19 @@
     .ltxe-foot { display:flex; gap:6px; align-items:center; margin-top:8px; }
     .ltxe-empty { padding:14px; text-align:center; color:#6e7681; font-size:12px; }
     .ltxe-stat { margin-top:6px; font-size:10px; color:#4b5563; line-height:1.4; word-break:break-all; white-space:pre-line; }
+    /* 卡片内按钮: 跟站点那两个按钮同宽同高 */
+    .ltxe-cardbtn {
+      display:block; width:100%; margin-top:6px; padding:7px 10px;
+      border-radius:8px; border:1px solid rgba(16,185,129,.45);
+      background:linear-gradient(135deg,#10b981,#059669); color:#fff;
+      font-size:12px; font-weight:600; line-height:1.35; cursor:pointer;
+      text-align:center; box-sizing:border-box;
+    }
+    .ltxe-cardbtn:hover { filter:brightness(1.1); }
+    .ltxe-cardbtn:disabled { opacity:.55; cursor:wait; }
+    .ltxe-cardbtn.ok  { background:linear-gradient(135deg,#22c55e,#16a34a); border-color:#22c55e; }
+    .ltxe-cardbtn.err { background:linear-gradient(135deg,#ef4444,#dc2626); border-color:#ef4444; }
+    .ltxe-cardbtn.busy{ background:linear-gradient(135deg,#f59e0b,#d97706); border-color:#f59e0b; }
     .ltxe-ta {
       width:100%; box-sizing:border-box; min-height:56px; resize:vertical; margin-top:8px;
       padding:6px 8px; border-radius:6px; border:1px solid #30363d;
@@ -1051,7 +1064,7 @@
       injectDetailButtons();
     }, 1200);
 
-    console.log('[Emby] AVdb 模式已加载 v1.7.1, import_api=' + importApiBase());
+    console.log('[Emby] AVdb 模式已加载 v1.8.0, import_api=' + importApiBase());
   }
 
   // ============================================================
@@ -1517,10 +1530,82 @@
       }
     }
 
+    // ---------- 卡片内注入「→ Emby」按钮 ----------
+    // 站点卡片底部有「复制 ed2k」/「添加到下载」两行按钮, 我们把按钮插进同一个容器。
+    // 链接不碰 DOM(拿不到), 而是按卡片上的番号回查 itemMap —— 数据已经由钩子收好了。
+    const CARD_BTN_CLS = 'ltxe-cardbtn';
+    const handledEls = new WeakSet();
+
+    // 从按钮往上找"卡片": 第一个只包含唯一番号的祖先
+    function codeFromEl(el) {
+      let n = el;
+      for (let i = 0; i < 8 && n && n !== document.body; i++, n = n.parentElement) {
+        const raw = String(n.textContent || '');
+        if (raw.length > 4000) break;         // 再往上就是整个列表了
+        const m = raw.match(/\b([A-Za-z0-9]{2,12}-\d{2,6})\b/g);
+        if (!m) continue;
+        const uniq = [...new Set(m.map((x) => x.toUpperCase()))];
+        if (uniq.length === 1) {
+          const k = uniq[0];
+          if (itemMap.has(k)) return k;
+          // 番号对但还没捕获到 -> 也先认这个卡片, 点击时再查
+          return k;
+        }
+        break;                                // 出现多个番号 = 已经越过卡片边界
+      }
+      return '';
+    }
+
+    function makeCardBtn(code) {
+      const b = document.createElement('button');
+      b.className = CARD_BTN_CLS;
+      b.textContent = '→ Emby';
+      b.title = code;
+      b.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        if (b.disabled) return;
+        const item = itemMap.get(code);
+        if (!item) { toast(code + ' 还没捕获到数据, 滚动到它那页再试', 'warn'); return; }
+        await doImport(item, b);
+      });
+      return b;
+    }
+
+    let cardTimer = null;
+    function scheduleCardInject() {
+      if (cardTimer) return;
+      cardTimer = setTimeout(() => {
+        cardTimer = null;
+        try { injectCardButtons(); } catch (e) { /* ignore */ }
+      }, 400);
+    }
+
+    function injectCardButtons() {
+      const cands = document.querySelectorAll('button, [role="button"]');
+      for (const el of cands) {
+        if (handledEls.has(el)) continue;
+        if (el.closest && el.closest('#ltxe-panel')) continue;
+        const t = (el.textContent || '').trim();
+        if (!t || t.length > 20) continue;
+        if (!/^(复制\s*(ed2k|磁力|链接)|添加到下载)/.test(t)) continue;
+
+        handledEls.add(el);
+        const code = codeFromEl(el);
+        if (!code) continue;
+
+        const stack = el.parentElement;
+        if (!stack) continue;
+        if (stack.querySelector('.' + CARD_BTN_CLS)) continue;   // 这个卡片已经加过
+        stack.appendChild(makeCardBtn(code));
+      }
+    }
+
     function boot() {
       if (document.getElementById('ltxe-panel')) return;
       buildPanel();
-      console.log('[Emby] LTX 模式已加载 v1.7.1, import_api=' + importApiBase());
+      injectCardButtons();
+      console.log('[Emby] LTX 模式已加载 v1.8.0, import_api=' + importApiBase());
     }
 
     if (document.readyState === 'loading') {
@@ -1529,8 +1614,11 @@
       setTimeout(boot, 800);
     }
 
-    const mo = new MutationObserver(() => { if (!document.getElementById('ltxe-panel')) boot(); });
-    try { mo.observe(document.documentElement, { childList: true, subtree: false }); } catch (e) { /* ignore */ }
+    const mo = new MutationObserver(() => {
+      if (!document.getElementById('ltxe-panel')) boot();
+      scheduleCardInject();
+    });
+    try { mo.observe(document.documentElement, { childList: true, subtree: true }); } catch (e) { /* ignore */ }
   }
 
   // ============================================================
