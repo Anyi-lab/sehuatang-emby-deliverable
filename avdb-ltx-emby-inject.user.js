@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AVdb + Jasna-LTX → Emby 一键入库（二合一）
 // @namespace    yg.emby.deliverable
-// @version      1.9.0
+// @version      1.9.1
 // @updateURL    https://gh-proxy.com/https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @downloadURL  https://gh-proxy.com/https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-ltx-emby-inject.user.js
 // @description  一份脚本管两个站：AVdb(localhost:8200) 卡片/磁力详情页注入「→ Emby」按钮；Jasna-LTX(ltxlib.dpdns.org) 右下角面板按番号一键入库。AVdb/LTX 单条走 /api/import(带 thread_id+title+thread_url 保住帖子上下文)，批量框走 /api/import/batch，共用 import_api(5081) 的「推115 → 落地 → 刮削 → strm → Emby」链路。不依赖任何站方脚本，不需要网页登录 115。
@@ -65,8 +65,8 @@
 
   // ============================================================
   //  公共: 调 import_api
-  //  ⚠ 5081 上没有 /api/import 单条接口(404), 只有 /api/import/batch
-  //    请求 { links: "多行 ed2k/磁力", kind, category }
+  //  单条: POST /api/import   { thread_id, magnet, title, thread_url, kind, category, origin }
+  //    批量: POST /api/import/batch { links: "多行 ed2k/磁力", kind, category, origin }
   //    响应 { submitted, failed, skipped, dup_skipped, items:[{ok,task_id,magnet,error}] }
   // ============================================================
   function gmJson(method, url, body, timeout) {
@@ -100,6 +100,7 @@
       title: o.title || '',
       thread_url: o.thread_url || '',
       kind: o.kind || 'fanhao',
+      origin: MODE,   // 任务来源: 'avdb' / 'ltx' —— 面板按来源分开显示, 不再默认标成色花堂 (v1.9.1)
     };
     if (o.category) body.category = o.category;
 
@@ -119,6 +120,7 @@
     const body = {
       links: Array.isArray(links) ? links.join('\n') : String(links),
       kind: kind || 'fanhao',
+      origin: MODE,   // 同上: 批量入队也带来源 (v1.9.1)
     };
     if (category) body.category = category;
     if (ctx && ctx.thread_id != null) body.thread_id = String(ctx.thread_id);

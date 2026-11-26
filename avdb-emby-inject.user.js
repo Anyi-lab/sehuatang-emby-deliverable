@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AVdb → Emby 一键入库 (色花堂点单版)
 // @namespace    sehuatang.emby.deliverable
-// @version      0.3.6
+// @version      0.3.7
 // @updateURL    https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
 // @downloadURL  https://raw.githubusercontent.com/Anyi-lab/sehuatang-emby-deliverable/main/avdb-emby-inject.user.js
 // @description  在 AVdb 文章卡片 + 在线资源(online-resources ranking/top/latest)卡片 + 磁力详情页(online-resources?movie=)上注入"→ Emby 入库"按钮。文章卡片直接取缓存 magnet; 在线资源卡片按番号反查本地库(优先)或拉取 JavDB 磁力; 磁力详情页对资源库磁力(色花堂)、在线磁链(javdb magnets)与评论区资源(javdb comment-resources, 含磁力/ED2K)逐条注入, 每条一键入库。再推给 import_api (localhost:5081) 全包入库; 入库时从下拉选落地分类(AV/FC2/丝袜/国产自拍/欧美/里番, 可选自定义)。
@@ -633,6 +633,7 @@
                 title: payload.title,
                 thread_url: (article && article.detail_url) || (movie ? 'https://javdb.com/v/' + movie.id : ''),
                 kind: opts.kind,
+                origin: 'avdb',   // 任务来源标记 (2026-11-26): 面板按来源区分, 不默认标成色花堂
               };
               if (opts.category) body.category = opts.category;
               const { taskId } = await callImport(body);
@@ -840,6 +841,7 @@
           title: payload.title,
           thread_url: magnetInfo.url || ('https://javdb.com/v/' + movieIdFromUrl()),
           kind: opts.kind,
+          origin: 'avdb',   // 同上
         };
         if (opts.category) body.category = opts.category;
         const { taskId } = await callImport(body);
